@@ -1,0 +1,77 @@
+{
+    "lean_fire": {
+        "annual_spending": 25000,
+        "current_savings": 800000,
+        "annual_contribution": 0,
+        "expected_return": 0.065,
+        "inflation_rate": 0.02,
+        "years_to_target": 10,
+        "tax_rate_on_gains": 0.15,
+        "tax_rate_on_dividends": 0.19,
+        "tax_rate_on_interest": 0.19,
+        "fund_fees": 0.002,
+        "withholding_tax": 0.15,
+        "social_security_contributions": 0.0
+    },
+    "fat_fire": {
+        "annual_spending": 80000,
+        "current_savings": 400000,
+        "annual_contribution": 30000,
+        "expected_return": 0.065,
+        "inflation_rate": 0.02,
+        "years_to_target": 25,
+        "tax_rate_on_gains": 0.15,
+        "tax_rate_on_dividends": 0.19,
+        "tax_rate_on_interest": 0.19,
+        "fund_fees": 0.002,
+        "withholding_tax": 0.15,
+        "social_security_contributions": 0.0
+    },
+    "coast_fire": {
+        "annual_spending": 45000,
+        "current_savings": 900000,
+        "annual_contribution": 0,
+        "expected_return": 0.065,
+        "inflation_rate": 0.02,
+        "years_to_target": 8,
+        "tax_rate_on_gains": 0.15,
+        "tax_rate_on_dividends": 0.19,
+        "tax_rate_on_interest": 0.19,
+        "fund_fees": 0.001,
+        "withholding_tax": 0.15,
+        "social_security_contributions": 0.0
+    },
+    "barista_fire": {
+        "annual_spending": 40000,
+        "current_savings": 300000,
+        "annual_contribution": 12000,
+        "expected_return": 0.065,
+        "inflation_rate": 0.02,
+        "years_to_target": 12,
+        "tax_rate_on_gains": 0.15,
+        "tax_rate_on_dividends": 0.19,
+        "tax_rate_on_interest": 0.19,
+        "fund_fees": 0.002,
+        "withholding_tax": 0.15,
+        "social_security_contributions": 0.0
+    },
+    "ucits_example": {
+        "annual_spending": 50000,
+        "current_savings": 900000,
+        "annual_contribution": 18000,
+        "expected_return": 0.061,
+        "inflation_rate": 0.02,
+        "years_to_target": 18,
+        "tax_rate_on_gains": 0.15,
+        "tax_rate_on_dividends": 0.19,
+        "tax_rate_on_interest": 0.19,
+        "fund_fees": 0.0015,
+        "withholding_tax": 0.15,
+        "social_security_contributions": 0.0,
+        "account_breakdown": {
+            "taxable": 300000,
+            "tax_deferred": 400000,
+            "tax_free": 200000
+        }
+    }
+}

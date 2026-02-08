@@ -6,6 +6,8 @@
 
 **☕ Si esta herramienta te ayuda a planificar tu libertad financiera, considera [invitarme a un café](https://buymeacoffee.com/pishu) para apoyar el desarrollo.**
 
+The source code is available on GitHub: [robermad1986/FIRE](https://github.com/robermad1986/FIRE).
+
 ---
 
 ## 📌 Tabla de Contenidos
@@ -64,7 +66,7 @@
 ### Instalación
 
 ```bash
-git clone https://github.com/your-username/FIRE.git
+git clone https://github.com/robermad1986/FIRE.git
 cd FIRE
 python3 src/cli.py
 ```

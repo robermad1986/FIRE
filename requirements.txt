@@ -1,1 +1,16 @@
-pytest
+# Core dependencies
+pytest>=7.4.0
+
+# Web Framework
+streamlit>=1.28.0
+
+# Data & Visualization
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.15.0
+
+# PDF Generation (optional, for future export)
+reportlab>=3.6.0
+
+# Utilities
+python-dateutil>=2.8.0

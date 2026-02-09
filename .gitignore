@@ -43,6 +43,7 @@ htmlcov/
 
 # Project specific
 DEPRECATED/
+.specstory/
 *.log
 *.tmp
 results/

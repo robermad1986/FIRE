@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional
 import sys
 from pathlib import Path
 import random  # For Monte Carlo simulations
+import re
 
 # Add project root to sys.path to allow imports from src
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -42,6 +43,17 @@ WELCOME_MESSAGE = """
 ║                                                                            ║
 ║  ☕ Si esta herramienta te ayuda, considera invitarme a un café:           ║
 ║     https://buymeacoffee.com/pishu                                         ║
+╚════════════════════════════════════════════════════════════════════════════╝
+"""
+
+STARTUP_LIMITATIONS_MESSAGE = """
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  🚧 LIMITACIONES IMPORTANTES (ACTUAL)                     ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║ • Simulador educativo: no sustituye asesoría fiscal/legal                ║
+║ • Tax Pack fiscal integrado: ES-2026 (web)                                ║
+║ • SWR: configurable en CLI; en web base sigue fija al 4%                  ║
+║ • Monte Carlo y fiscalidad: modelo anual simplificado                     ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -216,7 +228,7 @@ def get_float_input(
                         print(f"   Consejo: {help_text}")
                     continue
             
-            value = float(user_input.replace("€", "").replace(",", ""))
+            value = parse_localized_number(user_input, for_percentage=False)
             
             if value < min_val:
                 print(f"❌ El valor debe ser ≥ {min_val}.")
@@ -232,6 +244,52 @@ def get_float_input(
                 print(f"   Consejo: {help_text}")
 
 
+def parse_localized_number(raw_value: str, for_percentage: bool = False) -> float:
+    """Parse numbers allowing both comma and dot notation."""
+    cleaned = re.sub(r"[€%\s]", "", raw_value.strip())
+    if not cleaned:
+        raise ValueError("empty numeric input")
+
+    if "," in cleaned and "." in cleaned:
+        # Last separator is treated as decimal mark; the other is thousands mark.
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+        return float(cleaned)
+
+    # Percentages are usually typed as decimal numbers, so comma is decimal mark.
+    if for_percentage:
+        if "," in cleaned:
+            cleaned = cleaned.replace(",", ".")
+        return float(cleaned)
+
+    # Handle comma-only notation.
+    if "," in cleaned:
+        parts = cleaned.split(",")
+        if len(parts) > 1 and all(part.isdigit() for part in parts):
+            # 30,000 or 1,234,567 -> thousands grouping
+            if all(len(group) == 3 for group in parts[1:]):
+                cleaned = "".join(parts)
+            else:
+                # 30000,50 -> decimal comma
+                cleaned = cleaned.replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", ".")
+        return float(cleaned)
+
+    # Handle dot-only notation.
+    if "." in cleaned:
+        parts = cleaned.split(".")
+        if len(parts) > 1 and all(part.isdigit() for part in parts):
+            # 30.000 or 1.234.567 -> thousands grouping
+            if all(len(group) == 3 for group in parts[1:]):
+                cleaned = "".join(parts)
+        return float(cleaned)
+
+    return float(cleaned)
+
+
 def get_int_input(prompt: str, default: int, min_val: int = 0, max_val: int = None) -> int:
     """Get validated integer input from user."""
     while True:
@@ -241,7 +299,11 @@ def get_int_input(prompt: str, default: int, min_val: int = 0, max_val: int = No
             if not user_input:
                 return default
             
-            value = int(user_input)
+            parsed = parse_localized_number(user_input, for_percentage=False)
+            if not float(parsed).is_integer():
+                print("❌ Introduce un número entero válido.")
+                continue
+            value = int(parsed)
             if value < min_val:
                 print(f"❌ El valor debe ser ≥ {min_val}.")
                 continue
@@ -280,8 +342,7 @@ def get_percent_input(prompt: str, default: float, max_percent: float = 100) -> 
         
         try:
             # Remove % symbol if present
-            user_input = user_input.replace("%", "").strip()
-            value = float(user_input)
+            value = parse_localized_number(user_input, for_percentage=True)
             
             # Core logic: if value > what it would be in decimal form,
             # assume user meant percentage notation (e.g., "22" for 22% or "0.22" for 0.22%)
@@ -298,7 +359,7 @@ def get_percent_input(prompt: str, default: float, max_percent: float = 100) -> 
             return value
             
         except ValueError:
-            print(f"❌ Introduce un porcentaje válido (ej. 0.22 para {default*100:.2f}%).")
+            print(f"❌ Introduce un porcentaje válido (ej. 0,22 o 0.22 para {default*100:.2f}%).")
 
 
 # ============================================================================
@@ -805,9 +866,7 @@ def ask_with_default(prompt: str, default_value: float, unit: str = "", is_perce
             return default_value
         
         try:
-            # Remove common characters
-            cleaned = resp.replace("€", "").replace(",", ".").replace("%", "").strip()
-            value = float(cleaned)
+            value = parse_localized_number(resp, for_percentage=is_percentage)
             
             if is_percentage:
                 # User input logic for percentages
@@ -1839,6 +1898,7 @@ def main():
     """Main CLI entry point."""
     clear_screen()
     print(WELCOME_MESSAGE)
+    print(STARTUP_LIMITATIONS_MESSAGE)
     
     while True:
         choice = get_profile_choice()
@@ -1854,6 +1914,7 @@ def main():
             input("\nPresiona ENTER para continuar...")
             clear_screen()
             print(WELCOME_MESSAGE)
+            print(STARTUP_LIMITATIONS_MESSAGE)
             continue
         elif choice == "custom":
             config = input_custom_profile()
@@ -2070,6 +2131,7 @@ def main():
                 # Back to main menu
                 clear_screen()
                 print(WELCOME_MESSAGE)
+                print(STARTUP_LIMITATIONS_MESSAGE)
                 continue
             else:  # choice == "3"
                 # Exit

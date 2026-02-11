@@ -21,6 +21,7 @@ The source code is available on GitHub: [robermad1986/FIRE](https://github.com/r
 - [Parameters](#-parámetros-configurables)
 - [Examples](#-ejemplos)
 - [Testing](#-testing)
+- [Limitaciones Actuales](#-limitaciones-actuales-importantes)
 - [Disclaimers](#-disclaimers)
 
 ---
@@ -58,12 +59,38 @@ The source code is available on GitHub: [robermad1986/FIRE](https://github.com/r
 
 ---
 
+## 🚧 Limitaciones Actuales Importantes
+
+1. **No sustituye asesoría fiscal/legal**  
+   Es un simulador educativo. No genera liquidaciones oficiales ni recomendaciones personalizadas vinculantes.
+
+2. **Cobertura fiscal española dependiente de Tax Pack**  
+   La web usa reglas versionadas por año (`Tax Pack`). Si la norma cambia, hay que actualizar el pack para mantener precisión.
+
+3. **Cobertura temporal actual del pack: 2026**  
+   En el estado actual del repo, el pack integrado es `ES-2026`.
+
+4. **SWR no está al mismo nivel en CLI y web**  
+   En CLI es configurable; en web el objetivo FIRE base sigue calculándose con SWR fija del 4%.
+
+5. **Modelo de mercado simplificado**  
+   Monte Carlo usa distribución normal con parámetros constantes (retorno/volatilidad). No cubre todos los riesgos de cola ni cambios de régimen.
+
+6. **Impuestos modelados como aproximación anual**  
+   IRPF ahorro + Patrimonio + ISGF se aplican como drag anual sobre la simulación. No cubre toda la casuística personal (mínimos familiares, deducciones específicas, etc.).
+
+7. **Paridad funcional CLI/Web aún incompleta**  
+   Hay funcionalidades avanzadas del CLI que todavía no están expuestas con el mismo detalle en la interfaz web.
+
+---
+
 ## ⚡ Inicio Rápido
 
 ### Requisitos
 
 - Python 3.9+
-- Sin dependencias externas (stdlib puro)
+- CLI (`src/cli.py`): sin dependencias externas (stdlib puro)
+- Web (`app.py`): requiere dependencias de `requirements.txt` (Streamlit, Plotly, Pandas, NumPy)
 
 ### Instalación
 

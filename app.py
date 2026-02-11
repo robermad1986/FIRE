@@ -23,7 +23,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 import math
 from io import BytesIO
 from datetime import datetime
@@ -36,6 +36,13 @@ from src.calculator import (
     calculate_market_scenarios,
     project_retirement,
     calculate_net_worth,
+)
+from src.tax_engine import (
+    load_tax_pack,
+    list_available_taxpack_years,
+    get_region_options,
+    calculate_savings_tax,
+    calculate_wealth_taxes,
 )
 
 warnings.filterwarnings("ignore")
@@ -154,12 +161,22 @@ class ValidationError(Exception):
 # DYNAMIC INSPIRATIONAL TEXT GENERATION
 # =====================================================================
 
-def generate_fire_readiness_message(years_to_fire: int, years_horizon: int) -> Tuple[str, str]:
+def generate_fire_readiness_message(
+    years_to_fire: Optional[int],
+    years_horizon: int,
+) -> Tuple[str, str]:
     """
     Generate inspirational message based on FIRE timeline readiness.
     
     Returns: (emoji, message)
     """
+    if years_to_fire is None:
+        return "🧱", (
+            "Con los parámetros actuales, la mediana de escenarios no alcanza FIRE "
+            f"en tu horizonte ({years_horizon} años). No significa imposible, pero sí "
+            "que necesitas ajustar aportaciones, gasto objetivo o plazo."
+        )
+
     diff = years_to_fire - years_horizon
     
     if years_to_fire <= 5:
@@ -268,10 +285,20 @@ def generate_savings_velocity_message(monthly_contribution: float, annual_spendi
         )
 
 
-def generate_horizon_comparison_message(years_to_fire: int, years_horizon: int) -> str:
+def generate_horizon_comparison_message(
+    years_to_fire: Optional[int],
+    years_horizon: int,
+) -> str:
     """
     Generate contextual message comparing FIRE timeline to user's horizon.
     """
+    if years_to_fire is None:
+        return (
+            f"🧭 Con el escenario base, FIRE no se alcanza en {years_horizon} años. "
+            "Prioriza cambios de alto impacto: subir ahorro mensual, reducir gasto FIRE "
+            "objetivo, o extender horizonte."
+        )
+
     diff = years_to_fire - years_horizon
     
     if diff <= -5:
@@ -396,6 +423,8 @@ def monte_carlo_simulation(
     annual_spending: float = 0,
     num_simulations: int = 10_000,
     seed: int = 42,
+    tax_pack: Optional[Dict] = None,
+    region: Optional[str] = None,
 ) -> Dict:
     """
     Run Monte Carlo simulation with geometric Brownian motion.
@@ -417,39 +446,41 @@ def monte_carlo_simulation(
     """
     np.random.seed(seed)
     
-    months = years * 12
-    monthly_return_mean = mean_return / 12
-    monthly_volatility = volatility / math.sqrt(12)
-    
-    # Initialize simulation matrix (simulations x months)
-    paths = np.zeros((num_simulations, months))
-    paths[:, 0] = initial_wealth
-    
-    # Run simulations
-    for sim in range(num_simulations):
-        for month in range(1, months):
-            random_return = np.random.normal(monthly_return_mean, monthly_volatility)
-            paths[sim, month] = (
-                paths[sim, month - 1] * (1 + random_return) + monthly_contribution
-            )
-    
-    # Calculate annual snapshots for efficiency
+    annual_contribution = monthly_contribution * 12
+
+    # Initialize annual paths (simulations x years+1)
     annual_paths = np.zeros((num_simulations, years + 1))
     annual_paths[:, 0] = initial_wealth
-    for year in range(1, years + 1):
-        month_idx = year * 12 - 1
-        annual_paths[:, year] = paths[:, month_idx]
+
+    # Annual simulation with regional tax drag.
+    for sim in range(num_simulations):
+        portfolio = initial_wealth
+        for year in range(1, years + 1):
+            annual_return = np.random.normal(mean_return, volatility)
+            gross_growth = portfolio * annual_return
+            portfolio_pre_tax = portfolio + gross_growth + annual_contribution
+
+            if tax_pack and region:
+                savings_base = max(0.0, gross_growth)
+                savings_tax = calculate_savings_tax(savings_base, tax_pack, region)
+                wealth_taxes = calculate_wealth_taxes(portfolio_pre_tax, tax_pack, region)
+                portfolio = portfolio_pre_tax - savings_tax - wealth_taxes["total_wealth_tax"]
+            else:
+                portfolio = portfolio_pre_tax
+
+            annual_paths[sim, year] = max(0.0, portfolio)
     
     # Inflation adjustment (real values)
     inflation_factors = np.array([(1 + inflation_rate) ** y for y in range(years + 1)])
     real_paths = annual_paths / inflation_factors
     
-    # Calculate FIRE target (inflation-adjusted)
-    fire_target = annual_spending / 0.04 if annual_spending > 0 else 0
+    # FIRE target in today's euros; compare against real (inflation-adjusted) paths.
+    fire_target_real = annual_spending / 0.04 if annual_spending > 0 else 0
     
     # Success analysis
     final_values = annual_paths[:, -1]
-    percent_success = (final_values >= fire_target).sum() / num_simulations * 100
+    final_values_real = real_paths[:, -1]
+    percent_success = (final_values_real >= fire_target_real).sum() / num_simulations * 100
     
     # Percentiles
     percentile_5 = np.percentile(annual_paths, 5, axis=0)
@@ -461,7 +492,16 @@ def monte_carlo_simulation(
     # Year-by-year success rate (reaching FIRE target)
     yearly_success = np.zeros(years + 1)
     for year in range(years + 1):
-        yearly_success[year] = (annual_paths[:, year] >= fire_target).sum() / num_simulations * 100
+        yearly_success[year] = (
+            (real_paths[:, year] >= fire_target_real).sum() / num_simulations * 100
+        )
+
+    # Real-value percentiles for timeline interpretation in today's euros.
+    real_percentile_5 = np.percentile(real_paths, 5, axis=0)
+    real_percentile_25 = np.percentile(real_paths, 25, axis=0)
+    real_percentile_50 = np.percentile(real_paths, 50, axis=0)
+    real_percentile_75 = np.percentile(real_paths, 75, axis=0)
+    real_percentile_95 = np.percentile(real_paths, 95, axis=0)
     
     return {
         "paths": annual_paths,
@@ -471,13 +511,46 @@ def monte_carlo_simulation(
         "percentile_50": percentile_50,
         "percentile_75": percentile_75,
         "percentile_95": percentile_95,
+        "real_percentile_5": real_percentile_5,
+        "real_percentile_25": real_percentile_25,
+        "real_percentile_50": real_percentile_50,
+        "real_percentile_75": real_percentile_75,
+        "real_percentile_95": real_percentile_95,
         "success_rate_final": percent_success,
         "yearly_success": yearly_success,
         "final_values": final_values,
+        "final_values_real": final_values_real,
         "final_median": np.median(final_values),
+        "final_median_real": np.median(final_values_real),
         "final_percentile_95": np.percentile(final_values, 95),
-        "fire_target": fire_target,
+        "fire_target_real": fire_target_real,
+        "fire_target": fire_target_real,
     }
+
+
+def get_fiscal_return_adjustment(regimen_fiscal: str, include_optimización: bool) -> float:
+    """
+    Approximate annual return drag from taxes/friction by regime.
+    This ensures fiscal selector changes simulation outcomes.
+    """
+    base_drag = {
+        "España - Fondos de Inversión": 0.003,
+        "España - Cartera Directa": 0.012,
+        "Otro": 0.008,
+    }.get(regimen_fiscal, 0.008)
+
+    if include_optimización and regimen_fiscal == "España - Fondos de Inversión":
+        base_drag = max(0.0, base_drag - 0.0015)
+
+    return base_drag
+
+
+def find_years_to_fire(median_real_path: np.ndarray, fire_target: float) -> Optional[int]:
+    """Return first year reaching FIRE target in real terms, or None if not reached."""
+    for year, value in enumerate(median_real_path):
+        if value >= fire_target:
+            return year
+    return None
 
 
 # =====================================================================
@@ -494,6 +567,8 @@ def run_cached_simulation(
     volatility: float,
     inflation_rate: float,
     annual_spending: float,
+    tax_pack: Optional[Dict] = None,
+    region: Optional[str] = None,
 ) -> Dict:
     """
     Cached Monte Carlo simulation. Cache key invalidates if params change.
@@ -508,6 +583,8 @@ def run_cached_simulation(
         inflation_rate=inflation_rate,
         annual_spending=annual_spending,
         num_simulations=10_000,
+        tax_pack=tax_pack,
+        region=region,
     )
 
 
@@ -642,8 +719,8 @@ def render_sidebar() -> Dict:
     if regimen_fiscal == "España - Fondos de Inversión":
         st.sidebar.info(
             "⚖️ **Ventaja FIRE en España:** La Ley de Diferimiento permite traspasos exentos entre fondos "
-            "sin tributación, diferiendo impuestos hasta el reembolso final. Esta calculadora integra ese "
-            "beneficio. Estrategias americanas no lo consideran."
+            "sin tributación, diferiendo impuestos hasta el reembolso final. Esta calculadora usa una "
+            "aproximación de impacto fiscal para comparar escenarios. No sustituye asesoría fiscal profesional."
         )
 
     include_optimización = st.sidebar.checkbox(
@@ -651,6 +728,39 @@ def render_sidebar() -> Dict:
         value=False,
         help="Estrategia de harvest-loss para optimizar impuestos",
     )
+
+    tax_year = None
+    region = None
+    tax_pack_meta = None
+    if regimen_fiscal in ("España - Fondos de Inversión", "España - Cartera Directa"):
+        available_years = list_available_taxpack_years("es")
+        if available_years:
+            tax_year = st.sidebar.selectbox(
+                "Año fiscal (Tax Pack)",
+                options=available_years,
+                index=len(available_years) - 1,
+                help="Conjunto de reglas fiscales versionadas por año.",
+            )
+            try:
+                tax_pack = load_tax_pack(int(tax_year), "es")
+                tax_pack_meta = tax_pack.get("meta", {})
+                region_options = get_region_options(tax_pack)
+                region_labels = [label for _, label in region_options]
+                label_to_key = {label: key for key, label in region_options}
+                selected_label = st.sidebar.selectbox(
+                    "Comunidad / territorio",
+                    options=region_labels,
+                    index=region_labels.index("Madrid") if "Madrid" in region_labels else 0,
+                    help="Se usa para IRPF del ahorro y Patrimonio/ISGF regionales.",
+                )
+                region = label_to_key[selected_label]
+                if tax_pack_meta:
+                    st.sidebar.caption(
+                        f"Tax Pack {tax_pack_meta.get('country', 'ES')} "
+                        f"{tax_pack_meta.get('year', tax_year)} · v{tax_pack_meta.get('version', 'n/a')}"
+                    )
+            except Exception as e:
+                st.sidebar.warning(f"No se pudo cargar Tax Pack {tax_year}: {e}")
 
     # Compile parameters
     params = {
@@ -664,6 +774,9 @@ def render_sidebar() -> Dict:
         "gastos_anuales": gastos_anuales,
         "regimen_fiscal": regimen_fiscal,
         "include_optimización": include_optimización,
+        "tax_year": tax_year,
+        "region": region,
+        "tax_pack_meta": tax_pack_meta,
     }
 
     return params
@@ -680,27 +793,8 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
     fire_target = params["gastos_anuales"] / 0.04
     years_horizon = params["edad_objetivo"] - params["edad_actual"]
 
-    # Determine years to FIRE from Monte Carlo percentile 50
-    median_path = simulation_results["percentile_50"]
-    years_to_fire = None
-    for year, value in enumerate(median_path):
-        if value >= fire_target:
-            years_to_fire = year
-            break
-
-    if years_to_fire is None:
-        years_to_fire = years_horizon
-        years_status = "danger"
-        years_color_emoji = "🔴"
-    elif years_to_fire < 20:
-        years_status = "success"
-        years_color_emoji = "🟢"
-    elif years_to_fire < 30:
-        years_status = "warning"
-        years_color_emoji = "🟡"
-    else:
-        years_status = "danger"
-        years_color_emoji = "🔴"
+    # Determine years to FIRE from real-value median path (today's euros).
+    years_to_fire = find_years_to_fire(simulation_results["real_percentile_50"], fire_target)
 
     success_rate = simulation_results["success_rate_final"]
     
@@ -718,20 +812,29 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric(
-            label="⏱️ Años hasta FIRE",
-            value=years_to_fire,
-            delta=f"{years_to_fire - years_horizon:+d} años vs objetivo",
-            delta_color="inverse" if years_to_fire < years_horizon else "normal",
-        )
+        if years_to_fire is None:
+            st.metric(
+                label="⏱️ Años hasta FIRE",
+                value="No alcanzable",
+                delta=f"> {years_horizon} años con escenario base",
+                delta_color="off",
+            )
+        else:
+            st.metric(
+                label="⏱️ Años hasta FIRE",
+                value=years_to_fire,
+                delta=f"{years_to_fire - years_horizon:+d} años vs objetivo",
+                delta_color="inverse" if years_to_fire < years_horizon else "normal",
+            )
 
     with col2:
         final_nominal = simulation_results["percentile_50"][-1]
+        final_real = simulation_results["real_percentile_50"][-1]
         st.metric(
             label="💰 Patrimonio Final (P50)",
             value=f"€{final_nominal:,.0f}",
-            delta=f"€{final_nominal - fire_target:+,.0f} vs FIRE target",
-            delta_color="inverse" if final_nominal >= fire_target else "normal",
+            delta=f"Real: €{final_real:,.0f} ({final_real - fire_target:+,.0f} vs FIRE target)",
+            delta_color="inverse" if final_real >= fire_target else "normal",
         )
 
     with col3:
@@ -863,14 +966,19 @@ def render_main_chart(simulation_results: Dict, params: Dict) -> None:
         )
     )
 
-    # FIRE target threshold line
-    fig.add_hline(
-        y=fire_target,
-        line_dash="dash",
-        line_color="rgb(46, 204, 113)",
-        annotation_text=f"Objetivo FIRE: €{fire_target:,.0f}",
-        annotation_position="right",
-        name="Objetivo FIRE",
+    # Inflation-adjusted FIRE target in nominal euros (for chart consistency).
+    target_path_nominal = np.array(
+        [fire_target * ((1 + params["inflacion"]) ** y) for y in years]
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=years,
+            y=target_path_nominal,
+            mode="lines",
+            name="Objetivo FIRE (nominal, ajustado inflación)",
+            line=dict(color="rgb(46, 204, 113)", dash="dash", width=2),
+            hovertemplate="<b>Año %{x}</b><br>Objetivo FIRE: €%{y:,.0f}<extra></extra>",
+        )
     )
 
     fig.update_layout(
@@ -974,7 +1082,7 @@ def render_sensitivity_analysis(params: Dict) -> None:
         "Impacto en años hasta FIRE cuando rentabilidad/inflación varían respecto a valores base"
     )
 
-    base_return = params["rentabilidad_esperada"] * 100
+    base_return = params.get("rentabilidad_neta_simulacion", params["rentabilidad_esperada"]) * 100
     base_inflation = params["inflacion"] * 100
     fire_target = params["gastos_anuales"] / 0.04
     years_horizon = params["edad_objetivo"] - params["edad_actual"]
@@ -999,7 +1107,8 @@ def render_sensitivity_analysis(params: Dict) -> None:
                     portfolio * (1 + test_return)
                     + params["aportacion_mensual"] * 12
                 )
-                if portfolio >= fire_target:
+                real_portfolio = portfolio / ((1 + test_inflation) ** year)
+                if real_portfolio >= fire_target:
                     years_to_target = year
                     break
 
@@ -1174,12 +1283,25 @@ def main():
 
     # Privacy banner
     st.info(
-        "🔒 **Privacidad:** Todos los cálculos se ejecutan localmente en su navegador. "
-        "Ningún dato financiero abandona su dispositivo."
+        "🔒 **Privacidad:** Los cálculos se ejecutan en el servidor del despliegue actual (local o cloud). "
+        "Si ejecutas en local, los datos permanecen en tu equipo."
+    )
+    st.warning(
+        "🚧 **Limitaciones importantes (actual):**\n\n"
+        "• Simulador educativo: no sustituye asesoría fiscal/legal.\n"
+        "• Fiscalidad regional basada en Tax Pack versionado (actualmente ES-2026 en este repo).\n"
+        "• SWR en web: objetivo base calculado con 4%.\n"
+        "• Monte Carlo y fiscalidad: modelo anual simplificado."
     )
 
     # 1. RENDER SIDEBAR (Input Collection)
     params = render_sidebar()
+    tax_drag = get_fiscal_return_adjustment(
+        params["regimen_fiscal"],
+        params["include_optimización"],
+    )
+    mean_return_for_sim = params["rentabilidad_esperada"] - tax_drag
+    params["rentabilidad_neta_simulacion"] = mean_return_for_sim
 
     # 2. VALIDATE INPUTS
     is_valid, validation_messages = validate_inputs(params)
@@ -1197,17 +1319,31 @@ def main():
     st.divider()
 
     with st.spinner("🔄 Ejecutando simulación Monte Carlo (10,000 trayectorias)..."):
-        params_key = f"{params['patrimonio_inicial']}_{params['aportacion_mensual']}_{params['rentabilidad_esperada']}_{params['volatilidad']}_{params['inflacion']}_{params['gastos_anuales']}"
+        params_key = (
+            f"{params['patrimonio_inicial']}_{params['aportacion_mensual']}_"
+            f"{params['rentabilidad_esperada']}_{params['volatilidad']}_{params['inflacion']}_"
+            f"{params['gastos_anuales']}_{params['regimen_fiscal']}_{params['include_optimización']}_"
+            f"{params.get('tax_year')}_{params.get('region')}"
+        )
+
+        tax_pack_for_run = None
+        if params.get("tax_year") is not None and params.get("region"):
+            try:
+                tax_pack_for_run = load_tax_pack(int(params["tax_year"]), "es")
+            except Exception:
+                tax_pack_for_run = None
 
         simulation_results = run_cached_simulation(
             params_key=params_key,
             initial_wealth=params["patrimonio_inicial"],
             monthly_contribution=params["aportacion_mensual"],
             years=params["edad_objetivo"] - params["edad_actual"],
-            mean_return=params["rentabilidad_esperada"],
+            mean_return=mean_return_for_sim,
             volatility=params["volatilidad"],
             inflation_rate=params["inflacion"],
             annual_spending=params["gastos_anuales"],
+            tax_pack=tax_pack_for_run,
+            region=params.get("region"),
         )
 
     # 4. RENDER KPIs
@@ -1234,20 +1370,13 @@ def main():
     st.divider()
     
     # 8. FINAL INSPIRATIONAL MESSAGE
-    years_to_fire = None
     fire_target = params["gastos_anuales"] / 0.04
-    median_path = simulation_results["percentile_50"]
-    for year, value in enumerate(median_path):
-        if value >= fire_target:
-            years_to_fire = year
-            break
-    
-    if years_to_fire is None:
-        years_to_fire = params["edad_objetivo"] - params["edad_actual"]
+    years_to_fire = find_years_to_fire(simulation_results["real_percentile_50"], fire_target)
     
     final_emoji, final_msg = generate_fire_readiness_message(years_to_fire, params["edad_objetivo"] - params["edad_actual"])
-    
-    st.success(
+
+    final_banner = st.success if years_to_fire is not None else st.warning
+    final_banner(
         f"{final_emoji} **¡Tu Camino a la Libertad Financiera!**\n\n{final_msg}\n\n"
         f"**Próximos pasos:**\n"
         f"1. Descarga tu proyección (CSV) para seguimiento anual\n"

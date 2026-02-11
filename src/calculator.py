@@ -155,6 +155,26 @@ def project_portfolio(
     # Fraction of equity returns that are dividends (rest considered capital gains)
     dividend_yield_fraction = 0.15
 
+    # Normalize account breakdown into proportions. Supports both:
+    # - proportions summing to ~1.0
+    # - absolute amounts summing to portfolio
+    normalized_breakdown: Dict[str, float]
+    if account_breakdown:
+        positive_items = {
+            key: max(0.0, float(value))
+            for key, value in account_breakdown.items()
+            if value is not None
+        }
+        total_breakdown = sum(positive_items.values())
+        if total_breakdown > 0:
+            normalized_breakdown = {
+                key: value / total_breakdown for key, value in positive_items.items()
+            }
+        else:
+            normalized_breakdown = {"taxable": 1.0}
+    else:
+        normalized_breakdown = {"taxable": 1.0}
+
     for y in range(1, years + 1):
         # Gross returns by asset class (before fees and taxes)
         equity_return = portfolio * equity_share * expected_return
@@ -169,14 +189,34 @@ def project_portfolio(
         dividend_amount = equity_return * dividend_yield_fraction
         capital_gain_amount = gross_return - dividend_amount
 
-        # Taxes (apply only to income amounts)
-        tax_on_divs = dividend_amount * tax_rate_on_dividends
-        tax_on_interest = bond_return * tax_rate_on_interest
-        # Capital gains taxation: apply if taxes are intended to be annual (by default callers may pass 0)
-        tax_on_gains = capital_gain_amount * tax_rate_on_gains
+        # Taxes by account type:
+        # - taxable: pays annual taxes
+        # - tax_deferred / tax_free: no annual tax drag in this accumulation model
+        taxable_share = max(0.0, normalized_breakdown.get("taxable", 0.0))
+        deferred_share = max(0.0, normalized_breakdown.get("tax_deferred", 0.0))
+        tax_free_share = max(0.0, normalized_breakdown.get("tax_free", 0.0))
+        covered_share = taxable_share + deferred_share + tax_free_share
+        if covered_share <= 0:
+            taxable_share = 1.0
+            covered_share = 1.0
 
-        # Social security contributions (applied to gross_return portion if configured)
-        social_security_tax = gross_return * social_security_contributions
+        # Treat any unknown/missing share as taxable by default (conservative).
+        residual_taxable_share = max(0.0, 1.0 - covered_share)
+        effective_taxable_share = min(1.0, taxable_share + residual_taxable_share)
+
+        effective_div_tax_rate = min(1.0, max(0.0, tax_rate_on_dividends + withholding_tax))
+
+        tax_on_divs = dividend_amount * effective_taxable_share * effective_div_tax_rate
+        tax_on_interest = bond_return * effective_taxable_share * max(0.0, tax_rate_on_interest)
+        # Capital gains taxation: apply if taxes are intended to be annual (by default callers may pass 0)
+        tax_on_gains = (
+            capital_gain_amount * effective_taxable_share * max(0.0, tax_rate_on_gains)
+        )
+
+        # Social security contributions applied to taxable gross-return share.
+        social_security_tax = (
+            gross_return * effective_taxable_share * max(0.0, social_security_contributions)
+        )
 
         total_tax = tax_on_divs + tax_on_interest + tax_on_gains + social_security_tax
 
@@ -195,6 +235,7 @@ def project_portfolio(
             "real_portfolio": real_value,
             "tax_paid_year": total_tax,
             "fee_paid_year": fee_paid,
+            "taxable_share_applied": effective_taxable_share,
         }
 
     return results

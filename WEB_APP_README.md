@@ -95,8 +95,38 @@ Tu plan se adapta a 4 dimensiones:
 
 ### 7. **Privacidad Total**
 
-🔒 **Todos los cálculos se ejecutan localmente en tu navegador.**  
-Ningún dato financiero abandona tu dispositivo.
+🔒 **Los cálculos se ejecutan en el servidor donde despliegas la app (local o cloud).**  
+En ejecución local (`streamlit run app.py`), los datos permanecen en tu máquina.  
+En despliegues cloud, evita introducir datos sensibles y revisa la política del proveedor.
+
+---
+
+## 🚧 Limitaciones Actuales Importantes
+
+1. **Simulador educativo, no asesoría fiscal/legal**
+- Los resultados son estimaciones para planificación.
+- No sustituyen declaración fiscal ni asesor profesional.
+
+2. **Tax Pack y actualización normativa**
+- La fiscalidad regional se basa en un `Tax Pack` versionado.
+- Si cambia la norma, hay que actualizar el pack para mantener exactitud.
+
+3. **Cobertura temporal actual**
+- Tax Pack integrado en el repo: `ES-2026`.
+
+4. **SWR en web**
+- El objetivo FIRE base se calcula con SWR fija del 4% en esta versión.
+
+5. **Supuestos de Monte Carlo**
+- Retornos con distribución normal y parámetros constantes.
+- No modela todos los escenarios extremos de mercado.
+
+6. **Fiscalidad simplificada anual**
+- IRPF ahorro, Patrimonio e ISGF se aplican como drag anual aproximado.
+- No cubre toda la casuística personal/familiar de una liquidación real.
+
+7. **Paridad CLI/Web**
+- Algunas capacidades del CLI aún no están expuestas en la web con el mismo nivel de detalle.
 
 ---
 

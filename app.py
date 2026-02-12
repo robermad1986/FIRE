@@ -23,6 +23,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from typing import Dict, Tuple, List, Optional
+import inspect
 from datetime import datetime
 import warnings
 
@@ -112,6 +113,15 @@ st.markdown("""
 if "initial_load" not in st.session_state:
     st.session_state.initial_load = True
     st.session_state.cached_results = None
+
+
+def render_plotly_chart(fig, key: Optional[str] = None) -> None:
+    """Render Plotly chart with Streamlit-version-safe width handling."""
+    plotly_sig = inspect.signature(st.plotly_chart)
+    if "width" in plotly_sig.parameters:
+        st.plotly_chart(fig, width="stretch", config={"responsive": True}, key=key)
+    else:
+        st.plotly_chart(fig, use_container_width=True, config={"responsive": True}, key=key)
 
 # =====================================================================
 # 2. VALIDATION & ERROR HANDLING
@@ -538,6 +548,39 @@ def estimate_retirement_tax_context(
     }
 
 
+def estimate_auto_taxable_withdrawal_ratio(
+    initial_wealth: float,
+    monthly_contribution: float,
+    years: int,
+    expected_return: float,
+    contribution_growth_rate: float = 0.0,
+) -> float:
+    """Estimate taxable portion of withdrawals at retirement.
+
+    Approximation:
+    - Principal (cost basis) = initial wealth + cumulative contributions.
+    - Gains = projected portfolio - principal.
+    - Taxable ratio at withdrawal ~= gains / portfolio.
+    """
+    portfolio = max(0.0, float(initial_wealth))
+    principal = max(0.0, float(initial_wealth))
+    annual_contribution = max(0.0, float(monthly_contribution) * 12.0)
+    r = max(-0.99, float(expected_return))
+    g = max(-0.99, float(contribution_growth_rate))
+
+    for year in range(1, max(0, int(years)) + 1):
+        portfolio = portfolio * (1 + r)
+        contribution_year = annual_contribution * ((1 + g) ** (year - 1))
+        portfolio += contribution_year
+        principal += contribution_year
+
+    if portfolio <= 0:
+        return 0.0
+
+    gains = max(0.0, portfolio - principal)
+    return min(1.0, gains / portfolio)
+
+
 def get_display_fire_target(simulation_results: Dict, params: Dict) -> float:
     """Use a single FIRE target source for UI consistency."""
     if params.get("fiscal_priority") == "Jubilación":
@@ -569,9 +612,14 @@ def render_retirement_tax_focus_summary(params: Dict) -> None:
     col3.metric("Impuestos anuales estimados", f"€{ctx['total_annual_tax_retirement']:,.0f}")
     col4.metric("Objetivo FIRE ajustado", f"€{ctx['target_portfolio_gross']:,.0f}")
     st.caption(
-        f"Supuesto clave: {params.get('taxable_withdrawal_ratio', 0.4)*100:.0f}% de la retirada anual tributa "
+        f"Supuesto clave: {params.get('taxable_withdrawal_ratio_effective', params.get('taxable_withdrawal_ratio', 0.4))*100:.0f}% "
+        "de la retirada anual tributa "
         "como base del ahorro."
     )
+    if params.get("taxable_withdrawal_ratio_mode") == "Automático (estimado)":
+        st.caption(
+            "Ese porcentaje se estima automáticamente con aportaciones y crecimiento proyectado."
+        )
     st.caption(
         "Referencia de fórmula: objetivo base = gasto neto / SWR. Al subir SWR, ese objetivo base baja; "
         "el ajuste fiscal puede suavizar esa caída, pero no invertirla en condiciones normales."
@@ -672,7 +720,7 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
         depletion_texts[label] = (
             f"Año {int(depletion_df.iloc[0]['Año jubilación'])}"
             if not depletion_df.empty
-            else "No en horizonte"
+            else "No se agota"
         )
 
     start_cols = st.columns(5)
@@ -1236,14 +1284,37 @@ def render_sidebar() -> Dict:
         help="Estrategia de harvest-loss para optimizar impuestos",
     )
 
-    taxable_withdrawal_ratio = st.sidebar.slider(
-        "Parte de retirada que tributa en jubilación (%)",
-        min_value=0,
-        max_value=100,
-        value=40,
-        step=5,
-        help="Estimación de qué parte de tu retirada anual genera base del ahorro imponible.",
-    ) / 100
+    taxable_withdrawal_ratio_mode = st.sidebar.selectbox(
+        "Cálculo de parte retirada que tributa",
+        options=["Automático (estimado)", "Manual"],
+        index=0,
+        help=(
+            "Automático: se estima con aportaciones + crecimiento proyectado. "
+            "Manual: tú defines el porcentaje."
+        ),
+    )
+    taxable_withdrawal_ratio = 0.40
+    if taxable_withdrawal_ratio_mode == "Manual":
+        taxable_withdrawal_ratio = st.sidebar.slider(
+            "Parte de retirada que tributa en jubilación (%)",
+            min_value=0,
+            max_value=100,
+            value=40,
+            step=5,
+            help=(
+                "Estimación de qué parte de tu retirada anual genera base del ahorro imponible. "
+                "Depende de cuánto de la retirada sean plusvalías/intereses frente a principal aportado."
+            ),
+        ) / 100
+        if modo_guiado:
+            st.sidebar.caption(
+                "Guía rápida: ratio imponible ≈ plusvalías latentes / valor total de la cartera. "
+                "Ejemplo: cartera €500k con €200k de plusvalías -> 40% imponible (aprox)."
+            )
+    elif modo_guiado:
+        st.sidebar.caption(
+            "Modo automático activo: estimaremos ese porcentaje con tus aportaciones y rentabilidad esperada."
+        )
 
     tax_year = None
     region = None
@@ -1316,6 +1387,7 @@ def render_sidebar() -> Dict:
         "gastos_anuales": gastos_anuales,
         "safe_withdrawal_rate": safe_withdrawal_rate,
         "fiscal_priority": fiscal_priority,
+        "taxable_withdrawal_ratio_mode": taxable_withdrawal_ratio_mode,
         "taxable_withdrawal_ratio": taxable_withdrawal_ratio,
         "regimen_fiscal": regimen_fiscal,
         "include_optimización": include_optimización,
@@ -1380,6 +1452,10 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
         success_emoji = "🔴"
 
     active_model = simulation_results.get("model_name", params.get("simulation_model", "n/d"))
+    final_nominal = simulation_results["percentile_50"][-1]
+    final_real = simulation_results["real_percentile_50"][-1]
+    brecha_vs_objetivo = final_real - fire_target
+    inflation_factor_horizon = (1 + params["inflacion"]) ** years_horizon
     st.markdown(f"**Método en esta pestaña:** {active_model}")
     with st.expander("Qué hace cada método y cuándo usarlo", expanded=False):
         st.write(
@@ -1394,19 +1470,29 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
         )
     if params.get("modo_guiado", False):
         with st.expander("¿Cómo leer estos indicadores?", expanded=False):
-            st.write(
+            help_lines = (
                 "- **Años hasta FIRE**: cuándo llegarías al objetivo en el escenario central.\n"
                 "- **Capital al final (P50, euros de hoy)**: poder adquisitivo estimado al final del horizonte, comparado con dinero actual.\n"
                 "- **Probabilidad de éxito**: porcentaje de escenarios que sí alcanzan FIRE.\n"
-                "- **Rentabilidad real**: crecimiento descontando inflación."
+                "- **Rentabilidad real**: crecimiento descontando inflación.\n"
+                "- **Objetivo FIRE y alcanzable/no alcanzable**: se evalúan en euros de hoy (valor real).\n"
+                "- **Conversión real/nominal**: `real = nominal / (1 + inflación)^años`.\n"
+                f"- **Horizonte aplicado en estas tarjetas**: {years_horizon} años.\n"
+                f"- **Patrimonio nominal final (P50)**: €{final_nominal:,.0f} (euros futuros).\n"
+                f"- **Factor de inflación acumulada**: x{inflation_factor_horizon:.2f} "
+                f"(€1 hoy ≈ €{inflation_factor_horizon:.2f} al final).\n"
+                f"- **Brecha vs objetivo FIRE (euros de hoy)**: {brecha_vs_objetivo:+,.0f} €."
             )
-            st.caption(
-                "Euros de hoy = inflación descontada. Fórmula orientativa: "
-                "`real = nominal / (1 + inflación)^años`."
-            )
-            st.caption(
-                "El objetivo FIRE (gasto/SWR) y el estado de alcanzable/no alcanzable se calculan en euros de hoy."
-            )
+            nw = params.get("net_worth_data", {})
+            if nw:
+                help_lines += (
+                    "\n"
+                    f"- **Base de simulación**: €{params.get('patrimonio_base_simulacion', params['patrimonio_inicial']):,.0f} "
+                    f"({'capital invertible ampliado' if params.get('usar_capital_invertible_ampliado') else 'cartera líquida'}).\n"
+                    f"- **Patrimonio neto total**: €{nw.get('net_worth', 0):,.0f} "
+                    f"(equity inmuebles invertibles: €{params.get('equity_inmuebles_invertibles', 0):,.0f})."
+                )
+            st.write(help_lines)
 
     # Layout: 4 columns
     col1, col2, col3, col4 = st.columns(4)
@@ -1428,9 +1514,6 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
             )
 
     with col2:
-        final_nominal = simulation_results["percentile_50"][-1]
-        final_real = simulation_results["real_percentile_50"][-1]
-        brecha_vs_objetivo = final_real - fire_target
         st.metric(
             label="💰 Poder adquisitivo final (P50, € de hoy)",
             value=f"€{final_real:,.0f}",
@@ -1456,7 +1539,6 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
             delta=f"Ajustado por inflación {params['inflacion']*100:.1f}%",
         )
 
-    inflation_factor_horizon = (1 + params["inflacion"]) ** years_horizon
     col5, col6 = st.columns(2)
     with col5:
         st.metric(
@@ -1471,21 +1553,6 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
             value=f"x{inflation_factor_horizon:.2f}",
             delta=f"€1 hoy ≈ €{inflation_factor_horizon:.2f} al final",
             delta_color="off",
-        )
-
-    nw = params.get("net_worth_data", {})
-    st.caption(
-        f"Nota: el patrimonio nominal y real se muestran al final del horizonte completo ({years_horizon} años), "
-        "no en el año estimado de llegada a FIRE."
-    )
-    st.caption("Regla de lectura: FIRE se decide en valor real (euros de hoy); el nominal es una referencia de euros futuros.")
-    st.caption(f"Referencia adicional: equivalente nominal (P50) al final del horizonte: €{final_nominal:,.0f}.")
-    if nw:
-        st.caption(
-            f"Base de simulación: €{params.get('patrimonio_base_simulacion', params['patrimonio_inicial']):,.0f} "
-            f"({'capital invertible ampliado' if params.get('usar_capital_invertible_ampliado') else 'cartera líquida'}). "
-            f"Patrimonio neto total: €{nw.get('net_worth', 0):,.0f} | "
-            f"Equity inmuebles invertibles: €{params.get('equity_inmuebles_invertibles', 0):,.0f}."
         )
 
     # Unified narrative insight block
@@ -1512,7 +1579,10 @@ def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
     if params.get("fiscal_priority") == "Jubilación" and params.get("retirement_tax_context"):
         ctx = params["retirement_tax_context"]
         gross_withdrawal = ctx["gross_withdrawal_required"]
-        taxable_base = gross_withdrawal * params.get("taxable_withdrawal_ratio", 0.4)
+        taxable_base = gross_withdrawal * params.get(
+            "taxable_withdrawal_ratio_effective",
+            params.get("taxable_withdrawal_ratio", 0.4),
+        )
         savings_detail = calculate_savings_tax_with_details(taxable_base, tax_pack, params["region"])
         wealth_detail = calculate_wealth_taxes_with_details(ctx["target_portfolio_gross"], tax_pack, params["region"])
 
@@ -1527,7 +1597,7 @@ def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
         with st.expander("Ver detalle técnico (jubilación)", expanded=False):
             st.write(
                 f"Base imponible estimada de retirada: €{taxable_base:,.0f} "
-                f"({params.get('taxable_withdrawal_ratio', 0.4)*100:.0f}% de la retirada)."
+                f"({params.get('taxable_withdrawal_ratio_effective', params.get('taxable_withdrawal_ratio', 0.4))*100:.0f}% de la retirada)."
             )
             st.write(
                 f"Objetivo FIRE bruto estimado: €{ctx['target_portfolio_gross']:,.0f} "
@@ -1725,12 +1795,7 @@ def render_main_chart(simulation_results: Dict, params: Dict) -> None:
         .replace("(", "")
         .replace(")", "")
     )
-    st.plotly_chart(
-        fig,
-        width="stretch",
-        config={"responsive": True},
-        key=f"main_chart_{model_key}",
-    )
+    render_plotly_chart(fig, key=f"main_chart_{model_key}")
     if params.get("modo_guiado", False):
         st.caption(
             "Lectura rápida: línea azul = escenario central. Banda ancha = incertidumbre. "
@@ -1787,12 +1852,7 @@ def render_success_distribution_chart(simulation_results: Dict, params: Dict) ->
         .replace("(", "")
         .replace(")", "")
     )
-    st.plotly_chart(
-        fig,
-        width="stretch",
-        config={"responsive": True},
-        key=f"success_chart_{model_key}",
-    )
+    render_plotly_chart(fig, key=f"success_chart_{model_key}")
     if params.get("modo_guiado", False):
         st.caption(
             "Cada barra muestra la probabilidad acumulada de haber alcanzado FIRE en ese año."
@@ -1915,7 +1975,7 @@ def render_sensitivity_analysis(params: Dict) -> None:
         yaxis_title="Inflación esperada",
     )
 
-    st.plotly_chart(fig, width="stretch", config={"responsive": True})
+    render_plotly_chart(fig, key="sensitivity_matrix_chart")
 
     # Dynamic sensitivity insights  
     sensitivity_col1, sensitivity_col2 = st.columns(2)
@@ -2086,6 +2146,18 @@ def main():
     )
     mean_return_for_sim = params["rentabilidad_esperada"] - tax_drag
     params["rentabilidad_neta_simulacion"] = mean_return_for_sim
+    years_horizon = params["edad_objetivo"] - params["edad_actual"]
+    if params.get("taxable_withdrawal_ratio_mode") == "Automático (estimado)":
+        taxable_ratio_effective = estimate_auto_taxable_withdrawal_ratio(
+            initial_wealth=params.get("patrimonio_base_simulacion", params["patrimonio_inicial"]),
+            monthly_contribution=params.get("aportacion_mensual_efectiva", params["aportacion_mensual"]),
+            years=years_horizon,
+            expected_return=mean_return_for_sim,
+            contribution_growth_rate=params.get("contribution_growth_rate", 0.0),
+        )
+    else:
+        taxable_ratio_effective = params.get("taxable_withdrawal_ratio", 0.4)
+    params["taxable_withdrawal_ratio_effective"] = taxable_ratio_effective
 
     # 2. VALIDATE INPUTS
     is_valid, validation_messages = validate_inputs(params)
@@ -2104,7 +2176,6 @@ def main():
     st.subheader("🧪 Comparación de métodos")
     if params.get("modo_guiado"):
         st.caption("Compara los tres enfoques en pestañas. El detalle inferior usa el modelo base (Normal).")
-        st.caption("La llegada a FIRE y la probabilidad de éxito se evalúan en euros de hoy (valor real).")
     strategy_options = [
         "100% renta variable (histórica S&P 500 EE. UU., 1871+)",
         "70% renta variable / 30% renta fija (sintética)",
@@ -2143,7 +2214,7 @@ def main():
             retirement_ctx = estimate_retirement_tax_context(
                 net_spending=gasto_anual_neto_cartera,
                 safe_withdrawal_rate=params["safe_withdrawal_rate"],
-                taxable_withdrawal_ratio=params.get("taxable_withdrawal_ratio", 0.4),
+                taxable_withdrawal_ratio=params.get("taxable_withdrawal_ratio_effective", 0.4),
                 tax_pack=tax_pack_for_run,
                 region=params.get("region"),
             )
@@ -2176,7 +2247,7 @@ def main():
                 f"{params['rentabilidad_esperada']}_{params['volatilidad']}_{params['inflacion']}_"
                 f"{params.get('contribution_growth_rate')}_"
                 f"{params['gastos_anuales']}_{params.get('gasto_anual_neto_cartera')}_{params['regimen_fiscal']}_{params['include_optimización']}_"
-                f"{params['safe_withdrawal_rate']}_{params.get('fiscal_priority')}_{params.get('taxable_withdrawal_ratio')}_"
+                f"{params['safe_withdrawal_rate']}_{params.get('fiscal_priority')}_{params.get('taxable_withdrawal_ratio_effective')}_"
                 f"{model_type}_{historical_strategy}_{params.get('tax_year')}_{params.get('region')}"
             )
             simulation_results_by_model[model_label] = run_cached_simulation(
@@ -2228,7 +2299,7 @@ def main():
                         f"{params['rentabilidad_esperada']}_{params['volatilidad']}_{params['inflacion']}_"
                         f"{params.get('contribution_growth_rate')}_"
                         f"{params['gastos_anuales']}_{params.get('gasto_anual_neto_cartera')}_{params['regimen_fiscal']}_{params['include_optimización']}_"
-                        f"{params['safe_withdrawal_rate']}_{params.get('fiscal_priority')}_{params.get('taxable_withdrawal_ratio')}_"
+                        f"{params['safe_withdrawal_rate']}_{params.get('fiscal_priority')}_{params.get('taxable_withdrawal_ratio_effective')}_"
                         f"{model_type}_{chosen_strategy}_{params.get('tax_year')}_{params.get('region')}"
                     )
                     simulation_results_by_model[label] = run_cached_simulation(

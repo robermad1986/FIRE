@@ -735,6 +735,7 @@ def monte_carlo_simulation(
     volatility: float,
     inflation_rate: float,
     annual_spending: float = 0,
+    contribution_growth_rate: float = 0.0,
     num_simulations: int = 10_000,
     seed: int = 42,
     tax_pack: Optional[Dict] = None,
@@ -770,6 +771,7 @@ def monte_carlo_simulation(
             inflation_rate=inflation_rate,
             annual_spending=annual_spending,
             safe_withdrawal_rate=safe_withdrawal_rate,
+            contribution_growth_rate=contribution_growth_rate,
             historical_returns=historical,
             num_simulations=num_simulations,
             seed=seed,
@@ -788,6 +790,7 @@ def monte_carlo_simulation(
             inflation_rate=inflation_rate,
             annual_spending=annual_spending,
             safe_withdrawal_rate=safe_withdrawal_rate,
+            contribution_growth_rate=contribution_growth_rate,
             historical_returns=historical,
             tax_pack=tax_pack,
             region=region,
@@ -804,6 +807,7 @@ def monte_carlo_simulation(
         inflation_rate=inflation_rate,
         annual_spending=annual_spending,
         safe_withdrawal_rate=safe_withdrawal_rate,
+        contribution_growth_rate=contribution_growth_rate,
         num_simulations=num_simulations,
         seed=seed,
         tax_pack=tax_pack,
@@ -853,6 +857,7 @@ def run_cached_simulation(
     inflation_rate: float,
     annual_spending: float,
     safe_withdrawal_rate: float,
+    contribution_growth_rate: float,
     model_type: str,
     historical_strategy: str,
     tax_pack: Optional[Dict] = None,
@@ -871,6 +876,7 @@ def run_cached_simulation(
         inflation_rate=inflation_rate,
         annual_spending=annual_spending,
         safe_withdrawal_rate=safe_withdrawal_rate,
+        contribution_growth_rate=contribution_growth_rate,
         model_type=model_type,
         historical_strategy=historical_strategy,
         num_simulations=10_000,
@@ -943,7 +949,7 @@ def render_sidebar() -> Dict:
         value=int(profile_defaults["gastos_anuales"]),
         step=1_000,
         disabled=lock_profile_fields,
-        help="Gasto anual necesario para vivir en FIRE",
+        help="Se interpreta en euros de hoy. El modelo ajusta por inflación para años futuros.",
     )
     safe_withdrawal_rate = st.sidebar.slider(
         "SWR / TRS (%)",
@@ -1000,6 +1006,19 @@ def render_sidebar() -> Dict:
             "más recorrido en importes altos."
         ),
     )
+    usar_patrimonio_exacto = st.sidebar.checkbox(
+        "Introducir patrimonio exacto",
+        value=False,
+        help="Permite fijar importe exacto sin saltos de la barra.",
+    )
+    if usar_patrimonio_exacto:
+        patrimonio_inicial = st.sidebar.number_input(
+            "Patrimonio actual exacto (€)",
+            min_value=0,
+            max_value=20_000_000,
+            value=int(patrimonio_inicial),
+            step=1_000,
+        )
 
     aportacion_min_nonzero = 100
     aportacion_max = 50_000
@@ -1030,6 +1049,19 @@ def render_sidebar() -> Dict:
             "y mejor recorrido en importes altos."
         ),
     )
+    usar_aportacion_exacta = st.sidebar.checkbox(
+        "Introducir aportación exacta",
+        value=False,
+        help="Permite fijar aportación mensual exacta sin saltos de la barra.",
+    )
+    if usar_aportacion_exacta:
+        aportacion_mensual = st.sidebar.number_input(
+            "Aportación mensual exacta (€)",
+            min_value=0,
+            max_value=200_000,
+            value=int(aportacion_mensual),
+            step=50,
+        )
 
     edad_actual = st.sidebar.slider(
         "Edad actual",
@@ -1156,6 +1188,16 @@ def render_sidebar() -> Dict:
         disabled=lock_profile_fields,
         help="Inflación esperada para ajustar poder adquisitivo",
     ) / 100
+    inflacionar_aportacion = st.sidebar.checkbox(
+        "Actualizar aportación mensual con inflación",
+        value=False,
+        help="Si se activa, tu aportación sube cada año al ritmo de la inflación.",
+    )
+    contribution_growth_rate = inflacion if inflacionar_aportacion else 0.0
+    if modo_guiado:
+        st.sidebar.caption(
+            "Por defecto la aportación es fija en euros nominales. Activa esta opción para mantener poder de compra."
+        )
 
     st.sidebar.divider()
 
@@ -1269,6 +1311,8 @@ def render_sidebar() -> Dict:
         "rentabilidad_esperada": rentabilidad_esperada,
         "volatilidad": volatilidad,
         "inflacion": inflacion,
+        "inflacionar_aportacion": inflacionar_aportacion,
+        "contribution_growth_rate": contribution_growth_rate,
         "gastos_anuales": gastos_anuales,
         "safe_withdrawal_rate": safe_withdrawal_rate,
         "fiscal_priority": fiscal_priority,
@@ -1352,9 +1396,16 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
         with st.expander("¿Cómo leer estos indicadores?", expanded=False):
             st.write(
                 "- **Años hasta FIRE**: cuándo llegarías al objetivo en el escenario central.\n"
-                "- **Patrimonio final (P50)**: resultado típico al final del horizonte.\n"
+                "- **Capital al final (P50, euros de hoy)**: poder adquisitivo estimado al final del horizonte, comparado con dinero actual.\n"
                 "- **Probabilidad de éxito**: porcentaje de escenarios que sí alcanzan FIRE.\n"
                 "- **Rentabilidad real**: crecimiento descontando inflación."
+            )
+            st.caption(
+                "Euros de hoy = inflación descontada. Fórmula orientativa: "
+                "`real = nominal / (1 + inflación)^años`."
+            )
+            st.caption(
+                "El objetivo FIRE (gasto/SWR) y el estado de alcanzable/no alcanzable se calculan en euros de hoy."
             )
 
     # Layout: 4 columns
@@ -1373,17 +1424,18 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
                 label="⏱️ Años hasta FIRE",
                 value=years_to_fire,
                 delta=f"{years_to_fire - years_horizon:+d} años vs objetivo",
-                delta_color="inverse" if years_to_fire < years_horizon else "normal",
+                delta_color="inverse",
             )
 
     with col2:
         final_nominal = simulation_results["percentile_50"][-1]
         final_real = simulation_results["real_percentile_50"][-1]
+        brecha_vs_objetivo = final_real - fire_target
         st.metric(
-            label="💰 Patrimonio Final (P50)",
-            value=f"€{final_nominal:,.0f}",
-            delta=f"Real: €{final_real:,.0f} ({final_real - fire_target:+,.0f} vs FIRE target)",
-            delta_color="inverse" if final_real >= fire_target else "normal",
+            label="💰 Poder adquisitivo final (P50, € de hoy)",
+            value=f"€{final_real:,.0f}",
+            delta=f"{brecha_vs_objetivo:+,.0f} € vs objetivo FIRE",
+            delta_color="normal",
         )
 
     with col3:
@@ -1404,7 +1456,30 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
             delta=f"Ajustado por inflación {params['inflacion']*100:.1f}%",
         )
 
+    inflation_factor_horizon = (1 + params["inflacion"]) ** years_horizon
+    col5, col6 = st.columns(2)
+    with col5:
+        st.metric(
+            label="🧾 Patrimonio nominal final (P50)",
+            value=f"€{final_nominal:,.0f}",
+            delta="Euros futuros al final del horizonte",
+            delta_color="off",
+        )
+    with col6:
+        st.metric(
+            label="🛒 Factor de inflación acumulada",
+            value=f"x{inflation_factor_horizon:.2f}",
+            delta=f"€1 hoy ≈ €{inflation_factor_horizon:.2f} al final",
+            delta_color="off",
+        )
+
     nw = params.get("net_worth_data", {})
+    st.caption(
+        f"Nota: el patrimonio nominal y real se muestran al final del horizonte completo ({years_horizon} años), "
+        "no en el año estimado de llegada a FIRE."
+    )
+    st.caption("Regla de lectura: FIRE se decide en valor real (euros de hoy); el nominal es una referencia de euros futuros.")
+    st.caption(f"Referencia adicional: equivalente nominal (P50) al final del horizonte: €{final_nominal:,.0f}.")
     if nw:
         st.caption(
             f"Base de simulación: €{params.get('patrimonio_base_simulacion', params['patrimonio_inicial']):,.0f} "
@@ -2029,6 +2104,7 @@ def main():
     st.subheader("🧪 Comparación de métodos")
     if params.get("modo_guiado"):
         st.caption("Compara los tres enfoques en pestañas. El detalle inferior usa el modelo base (Normal).")
+        st.caption("La llegada a FIRE y la probabilidad de éxito se evalúan en euros de hoy (valor real).")
     strategy_options = [
         "100% renta variable (histórica S&P 500 EE. UU., 1871+)",
         "70% renta variable / 30% renta fija (sintética)",
@@ -2098,6 +2174,7 @@ def main():
                 f"{params.get('aportacion_mensual_efectiva')}_{params.get('renta_bruta_alquiler_anual_efectiva')}_"
                 f"{params.get('ahorro_vivienda_habitual_anual_efectivo')}_"
                 f"{params['rentabilidad_esperada']}_{params['volatilidad']}_{params['inflacion']}_"
+                f"{params.get('contribution_growth_rate')}_"
                 f"{params['gastos_anuales']}_{params.get('gasto_anual_neto_cartera')}_{params['regimen_fiscal']}_{params['include_optimización']}_"
                 f"{params['safe_withdrawal_rate']}_{params.get('fiscal_priority')}_{params.get('taxable_withdrawal_ratio')}_"
                 f"{model_type}_{historical_strategy}_{params.get('tax_year')}_{params.get('region')}"
@@ -2112,6 +2189,7 @@ def main():
                 inflation_rate=params["inflacion"],
                 annual_spending=annual_spending_for_target,
                 safe_withdrawal_rate=params["safe_withdrawal_rate"],
+                contribution_growth_rate=params.get("contribution_growth_rate", 0.0),
                 model_type=model_type,
                 historical_strategy=historical_strategy,
                 tax_pack=tax_pack_accumulation,
@@ -2148,6 +2226,7 @@ def main():
                         f"{params.get('aportacion_mensual_efectiva')}_{params.get('renta_bruta_alquiler_anual_efectiva')}_"
                         f"{params.get('ahorro_vivienda_habitual_anual_efectivo')}_"
                         f"{params['rentabilidad_esperada']}_{params['volatilidad']}_{params['inflacion']}_"
+                        f"{params.get('contribution_growth_rate')}_"
                         f"{params['gastos_anuales']}_{params.get('gasto_anual_neto_cartera')}_{params['regimen_fiscal']}_{params['include_optimización']}_"
                         f"{params['safe_withdrawal_rate']}_{params.get('fiscal_priority')}_{params.get('taxable_withdrawal_ratio')}_"
                         f"{model_type}_{chosen_strategy}_{params.get('tax_year')}_{params.get('region')}"
@@ -2162,6 +2241,7 @@ def main():
                         inflation_rate=params["inflacion"],
                         annual_spending=annual_spending_for_target,
                         safe_withdrawal_rate=params["safe_withdrawal_rate"],
+                        contribution_growth_rate=params.get("contribution_growth_rate", 0.0),
                         model_type=model_type,
                         historical_strategy=chosen_strategy,
                         tax_pack=tax_pack_accumulation,

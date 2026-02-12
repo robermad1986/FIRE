@@ -60,6 +60,7 @@ def load_historical_annual_returns(strategy: str = "sp500_us_total_return") -> n
 def _simulate_from_return_matrix(
     initial_wealth: float,
     annual_contribution: float,
+    contribution_growth_rate: float,
     inflation_rate: float,
     annual_spending: float,
     safe_withdrawal_rate: float,
@@ -79,8 +80,9 @@ def _simulate_from_return_matrix(
         portfolio = initial_wealth
         for year in range(1, years + 1):
             annual_return = annual_returns_matrix[sim, year - 1]
+            annual_contribution_year = annual_contribution * ((1 + contribution_growth_rate) ** (year - 1))
             gross_growth = portfolio * annual_return
-            portfolio_pre_tax = portfolio + gross_growth + annual_contribution
+            portfolio_pre_tax = portfolio + gross_growth + annual_contribution_year
 
             if tax_pack and region:
                 savings_base = max(0.0, gross_growth)
@@ -140,6 +142,7 @@ def monte_carlo_normal(
     inflation_rate: float,
     annual_spending: float,
     safe_withdrawal_rate: float,
+    contribution_growth_rate: float = 0.0,
     num_simulations: int = 10_000,
     seed: int = 42,
     tax_pack: Optional[Dict] = None,
@@ -151,6 +154,7 @@ def monte_carlo_normal(
     return _simulate_from_return_matrix(
         initial_wealth=initial_wealth,
         annual_contribution=monthly_contribution * 12,
+        contribution_growth_rate=contribution_growth_rate,
         inflation_rate=inflation_rate,
         annual_spending=annual_spending,
         safe_withdrawal_rate=safe_withdrawal_rate,
@@ -168,6 +172,7 @@ def monte_carlo_bootstrap(
     annual_spending: float,
     safe_withdrawal_rate: float,
     historical_returns: np.ndarray,
+    contribution_growth_rate: float = 0.0,
     num_simulations: int = 10_000,
     seed: int = 42,
     tax_pack: Optional[Dict] = None,
@@ -179,6 +184,7 @@ def monte_carlo_bootstrap(
     return _simulate_from_return_matrix(
         initial_wealth=initial_wealth,
         annual_contribution=monthly_contribution * 12,
+        contribution_growth_rate=contribution_growth_rate,
         inflation_rate=inflation_rate,
         annual_spending=annual_spending,
         safe_withdrawal_rate=safe_withdrawal_rate,
@@ -196,6 +202,7 @@ def backtest_rolling_windows(
     annual_spending: float,
     safe_withdrawal_rate: float,
     historical_returns: np.ndarray,
+    contribution_growth_rate: float = 0.0,
     tax_pack: Optional[Dict] = None,
     region: Optional[str] = None,
 ) -> Dict:
@@ -213,6 +220,7 @@ def backtest_rolling_windows(
     result = _simulate_from_return_matrix(
         initial_wealth=initial_wealth,
         annual_contribution=monthly_contribution * 12,
+        contribution_growth_rate=contribution_growth_rate,
         inflation_rate=inflation_rate,
         annual_spending=annual_spending,
         safe_withdrawal_rate=safe_withdrawal_rate,

@@ -372,9 +372,10 @@ def render_plain_language_overview() -> None:
     """Show an easy-to-understand explanation of what the app does."""
     st.subheader("🧭 ¿Qué hace esta calculadora?")
     st.markdown(
-        "1. **Recoge tus datos básicos**: cuánto tienes, cuánto ahorras y cuánto gastarías al retirarte.\n"
-        "2. **Simula muchos futuros posibles**: para estimar cómo podría crecer tu dinero.\n"
-        "3. **Te devuelve una probabilidad**: de llegar a tu objetivo FIRE con esos datos."
+        "Esta calculadora convierte tus decisiones de hoy en una historia financiera plausible para los "
+        "próximos años. Primero toma tu punto de partida (patrimonio, aportaciones, edad y gasto esperado), "
+        "después proyecta miles de trayectorias de mercado con inflación y fiscalidad, y finalmente te muestra "
+        "qué tan probable es alcanzar tu objetivo FIRE y en qué plazos podrías hacerlo."
     )
     with st.expander("Ejemplo rápido (lenguaje simple)", expanded=False):
         st.write(
@@ -384,9 +385,37 @@ def render_plain_language_overview() -> None:
         )
 
 
+def render_active_context_summary(params: Dict) -> None:
+    """Render a unified narrative block for active simulation context."""
+    base_name = (
+        "capital invertible ampliado"
+        if params.get("usar_capital_invertible_ampliado")
+        else "cartera líquida"
+    )
+    base_explanation = (
+        "cartera líquida + inmuebles invertibles netos - otras deudas"
+        if params.get("usar_capital_invertible_ampliado")
+        else "solo cartera líquida"
+    )
+    fiscal_focus = "jubilación" if params.get("fiscal_priority") == "Jubilación" else "acumulación"
+    fiscal_sentence = (
+        "El objetivo FIRE se ajusta para aproximar impuestos durante la retirada de capital."
+        if fiscal_focus == "jubilación"
+        else "La simulación prioriza la fiscalidad durante los años previos a FIRE."
+    )
+
+    st.markdown(
+        "### 📘 Contexto del escenario activo\n"
+        f"En esta ejecución, la simulación arranca desde **{base_name}** "
+        f"(base usada: **€{params.get('patrimonio_base_simulacion', params['patrimonio_inicial']):,.0f}**, "
+        f"{base_explanation}; la vivienda habitual se mantiene fuera de esta base). "
+        f"Además, el enfoque fiscal está orientado a **{fiscal_focus}**: {fiscal_sentence}"
+    )
+
+
 def render_simple_result_summary(simulation_results: Dict, params: Dict) -> None:
     """Show a plain-language summary for non-professional users."""
-    fire_target = simulation_results.get("fire_target_real", params["gastos_anuales"] / params["safe_withdrawal_rate"])
+    fire_target = get_display_fire_target(simulation_results, params)
     years_horizon = params["edad_objetivo"] - params["edad_actual"]
     years_to_fire = find_years_to_fire(simulation_results["real_percentile_50"], fire_target)
     success_rate = simulation_results["success_rate_final"]
@@ -433,20 +462,39 @@ def estimate_retirement_tax_context(
 
     ratio = min(1.0, max(0.0, taxable_withdrawal_ratio))
     portfolio_target = base_target
+    annual_savings_tax = 0.0
+    annual_wealth_tax = 0.0
+    gross_withdrawal = net_spending
+    converged = False
+    iterations = 0
 
-    for _ in range(8):
+    # Fixed-point solve with convergence check to avoid drift/artifacts.
+    for outer_idx in range(1, 31):
+        iterations = outer_idx
         wealth_detail = calculate_wealth_taxes_with_details(portfolio_target, tax_pack, region)
         annual_wealth_tax = wealth_detail["total_wealth_tax"]
 
-        gross_withdrawal = net_spending + annual_wealth_tax
-        annual_savings_tax = 0.0
-        for _ in range(12):
-            taxable_base = max(0.0, gross_withdrawal * ratio)
+        gross_withdrawal_candidate = net_spending + annual_wealth_tax
+        for _ in range(30):
+            taxable_base = max(0.0, gross_withdrawal_candidate * ratio)
             savings_detail = calculate_savings_tax_with_details(taxable_base, tax_pack, region)
-            annual_savings_tax = savings_detail["tax"]
-            gross_withdrawal = net_spending + annual_wealth_tax + annual_savings_tax
+            annual_savings_tax_new = savings_detail["tax"]
+            updated_gross = net_spending + annual_wealth_tax + annual_savings_tax_new
+            if abs(updated_gross - gross_withdrawal_candidate) <= 0.01:
+                annual_savings_tax = annual_savings_tax_new
+                gross_withdrawal_candidate = updated_gross
+                break
+            annual_savings_tax = annual_savings_tax_new
+            gross_withdrawal_candidate = updated_gross
 
-        portfolio_target = gross_withdrawal / safe_withdrawal_rate
+        new_target = gross_withdrawal_candidate / safe_withdrawal_rate
+        if abs(new_target - portfolio_target) <= 1.0:
+            portfolio_target = new_target
+            gross_withdrawal = gross_withdrawal_candidate
+            converged = True
+            break
+        portfolio_target = new_target
+        gross_withdrawal = gross_withdrawal_candidate
 
     return {
         "base_target": base_target,
@@ -455,7 +503,23 @@ def estimate_retirement_tax_context(
         "annual_wealth_tax_retirement": annual_wealth_tax,
         "total_annual_tax_retirement": annual_savings_tax + annual_wealth_tax,
         "target_portfolio_gross": portfolio_target,
+        "converged": converged,
+        "iterations": iterations,
     }
+
+
+def get_display_fire_target(simulation_results: Dict, params: Dict) -> float:
+    """Use a single FIRE target source for UI consistency."""
+    if params.get("fiscal_priority") == "Jubilación":
+        ctx = params.get("retirement_tax_context")
+        if ctx and ctx.get("target_portfolio_gross") is not None:
+            return float(ctx["target_portfolio_gross"])
+    return float(
+        simulation_results.get(
+            "fire_target_real",
+            params["gastos_anuales"] / params["safe_withdrawal_rate"],
+        )
+    )
 
 
 def render_retirement_tax_focus_summary(params: Dict) -> None:
@@ -476,6 +540,10 @@ def render_retirement_tax_focus_summary(params: Dict) -> None:
     st.caption(
         f"Supuesto clave: {params.get('taxable_withdrawal_ratio', 0.4)*100:.0f}% de la retirada anual tributa "
         "como base del ahorro."
+    )
+    st.caption(
+        "Referencia de fórmula: objetivo base = gasto neto / SWR. Al subir SWR, ese objetivo base baja; "
+        "el ajuste fiscal puede suavizar esa caída, pero no invertirla en condiciones normales."
     )
 
 
@@ -848,9 +916,10 @@ def render_sidebar() -> Dict:
             "Estos parámetros están bloqueados. Desmarca 'Bloquear parámetros del perfil' para editarlos."
         )
     if modo_guiado:
+        objetivo_cartera = gastos_anuales / safe_withdrawal_rate if safe_withdrawal_rate > 0 else 0
         st.sidebar.info(
             "📌 Objetivo de cartera = Gastos anuales / SWR.\n"
-            "Ejemplo: €30.000 / 4% = €750.000."
+            f"Con tus datos: €{gastos_anuales:,.0f} / {safe_withdrawal_rate*100:.1f}% = €{objetivo_cartera:,.0f}."
         )
 
     st.sidebar.divider()
@@ -1168,7 +1237,7 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
     """
     Render top-level KPI metrics in 4-column layout with color coding.
     """
-    fire_target = simulation_results.get("fire_target_real", params["gastos_anuales"] / params["safe_withdrawal_rate"])
+    fire_target = get_display_fire_target(simulation_results, params)
     years_horizon = params["edad_objetivo"] - params["edad_actual"]
 
     # Determine years to FIRE from real-value median path (today's euros).
@@ -1264,37 +1333,20 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
             f"Equity inmuebles invertibles: €{params.get('equity_inmuebles_invertibles', 0):,.0f}."
         )
 
-    # Dynamic inspirational messages
+    # Unified narrative insight block
     st.divider()
-    
-    col_msg1, col_msg2 = st.columns(2)
-    
-    with col_msg1:
-        emoji_readiness, msg_readiness = generate_fire_readiness_message(years_to_fire, years_horizon)
-        st.info(f"{emoji_readiness} **Tu Timeline FIRE**\n\n{msg_readiness}")
-    
-    with col_msg2:
-        emoji_success, msg_success = generate_success_probability_message(success_rate)
-        if success_rate >= 75:
-            st.success(f"{emoji_success} **Tu Probabilidad de Éxito**\n\n{msg_success}")
-        elif success_rate >= 60:
-            st.warning(f"{emoji_success} **Tu Probabilidad de Éxito**\n\n{msg_success}")
-        else:
-            st.error(f"{emoji_success} **Tu Probabilidad de Éxito**\n\n{msg_success}")
-    
-    # Additional insights
-    col_velocity, col_horizon = st.columns(2)
-    
-    with col_velocity:
-        emoji_velocity, msg_velocity = generate_savings_velocity_message(
-            params["aportacion_mensual"], 
-            params["gastos_anuales"]
-        )
-        st.info(f"{emoji_velocity} **Tu Ritmo de Ahorro**\n\n{msg_velocity}")
-    
-    with col_horizon:
-        msg_comparison = generate_horizon_comparison_message(years_to_fire, years_horizon)
-        st.info(f"📊 **Comparación vs Objetivo**\n\n{msg_comparison}")
+    emoji_readiness, msg_readiness = generate_fire_readiness_message(years_to_fire, years_horizon)
+    _emoji_success, msg_success = generate_success_probability_message(success_rate)
+    _emoji_velocity, msg_velocity = generate_savings_velocity_message(
+        params["aportacion_mensual"],
+        params["gastos_anuales"],
+    )
+    msg_comparison = generate_horizon_comparison_message(years_to_fire, years_horizon)
+
+    st.markdown(
+        "### 🧠 Lectura guiada del escenario\n"
+        f"{emoji_readiness} {msg_readiness} {msg_success} {msg_velocity} {msg_comparison}"
+    )
 
 
 def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
@@ -1417,7 +1469,7 @@ def render_main_chart(simulation_results: Dict, params: Dict) -> None:
     Uses Plotly for interactivity.
     """
     years = np.arange(len(simulation_results["percentile_50"]))
-    fire_target = simulation_results.get("fire_target_real", params["gastos_anuales"] / params["safe_withdrawal_rate"])
+    fire_target = get_display_fire_target(simulation_results, params)
     
     fig = go.Figure()
 
@@ -1742,7 +1794,7 @@ def render_export_options(simulation_results: Dict, params: Dict) -> None:
     with col1:
         # CSV Export
         years = np.arange(len(simulation_results["percentile_50"]))
-        fire_target = simulation_results.get("fire_target_real", params["gastos_anuales"] / params["safe_withdrawal_rate"])
+        fire_target = get_display_fire_target(simulation_results, params)
 
         export_data = pd.DataFrame(
             {
@@ -1828,28 +1880,7 @@ def main():
 
     # 1. RENDER SIDEBAR (Input Collection)
     params = render_sidebar()
-    if params.get("usar_capital_invertible_ampliado"):
-        st.info(
-            "ℹ️ Simulación usando capital invertible ampliado como capital inicial "
-            "(cartera líquida + inmuebles invertibles netos - otras deudas). "
-            "La vivienda habitual no se incluye en esta base."
-        )
-    else:
-        st.info(
-            "ℹ️ Simulación usando solo cartera líquida como capital inicial. "
-            "El inmobiliario y la deuda se muestran como contexto patrimonial."
-        )
-    if params.get("fiscal_priority") == "Jubilación":
-        st.info(
-            "🧭 Enfoque fiscal activo: **Jubilación**. "
-            "El objetivo FIRE se ajusta para estimar impuestos al retirar capital, "
-            "no solo impuestos durante la fase de acumulación."
-        )
-    else:
-        st.info(
-            "🧭 Enfoque fiscal activo: **Acumulación**. "
-            "La simulación aplica impuestos durante los años previos a FIRE."
-        )
+    render_active_context_summary(params)
     tax_drag = get_fiscal_return_adjustment(
         params["regimen_fiscal"],
         params["include_optimización"],
@@ -2053,7 +2084,7 @@ def main():
     st.divider()
     
     # 8. FINAL INSPIRATIONAL MESSAGE
-    fire_target = simulation_results.get("fire_target_real", params["gastos_anuales"] / params["safe_withdrawal_rate"])
+    fire_target = get_display_fire_target(simulation_results, params)
     years_to_fire = find_years_to_fire(simulation_results["real_percentile_50"], fire_target)
     
     final_emoji, final_msg = generate_fire_readiness_message(years_to_fire, params["edad_objetivo"] - params["edad_actual"])

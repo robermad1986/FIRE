@@ -54,6 +54,9 @@ The source code is available on GitHub: [robermad1986/FIRE](https://github.com/r
 - **🎓 Explicaciones Contextuales** — Cada parámetro con ejemplos y consejos
 - **🌍 Soporte Multi-País** — Ajusta impuestos para tu país específico
 
+Nota de consistencia reciente (web): la explicación del objetivo FIRE en el panel guiado se calcula en tiempo real con la fórmula
+`Objetivo de cartera = Gastos anuales / SWR`, y el objetivo mostrado se unifica entre KPIs, gráfico principal y exportes.
+
 ### 🧪 Validación Exhaustiva
 
 - ✅ **Test Suite Completa** — 30+ unit tests

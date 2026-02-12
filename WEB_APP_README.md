@@ -36,6 +36,15 @@ Desplegar en **Streamlit Cloud** con un solo click: [Abrir en línea]() *(en des
 
 ## 📊 Características de la Aplicación Web
 
+### 🆕 Últimos cambios (UI y consistencia)
+
+- Narrativa unificada en la página principal: menos bloques sueltos y lectura más fluida.
+- Bloque de contexto activo de simulación (base usada y enfoque fiscal aplicado).
+- Explicación dinámica del objetivo FIRE en sidebar:
+  - `Objetivo de cartera = Gastos anuales / SWR`
+  - con cálculo en tiempo real según tus valores.
+- Consistencia del objetivo mostrado en KPIs, gráficos y exportes cuando se usa enfoque fiscal de jubilación.
+
 ### 1. **Panel de Control Interactivo (Sidebar)**
 Configura tu perfil en tiempo real:
 - 💰 Patrimonio inicial y aportación mensual
@@ -49,6 +58,7 @@ Configura tu perfil en tiempo real:
 
 Nota: puedes elegir si la simulación parte de cartera líquida (modo base) o capital invertible ampliado
 (cartera líquida + equity de inmuebles invertibles - otras deudas). La vivienda habitual no se incluye en esa base.
+En modo guiado, el objetivo FIRE se recalcula al momento al cambiar gasto anual o SWR.
 
 ### 2. **Dashboard de KPIs con Color-Coding Automático**
 

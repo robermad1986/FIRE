@@ -39,10 +39,16 @@ Desplegar en **Streamlit Cloud** con un solo click: [Abrir en línea]() *(en des
 ### 1. **Panel de Control Interactivo (Sidebar)**
 Configura tu perfil en tiempo real:
 - 💰 Patrimonio inicial y aportación mensual
+- 🏠 Patrimonio inmobiliario y deudas (opcional)
 - 📅 Edad actual y objetivo FIRE
 - 📈 Rentabilidad esperada y volatilidad
 - 💵 Inflación y gastos anuales en jubilación
 - 🏛️ Régimen fiscal (España - Fondos/Cartera Directa)
+- 🧭 Modo guiado con explicaciones en lenguaje simple
+- 🎯 Prioridad fiscal: enfoque en acumulación o en jubilación
+
+Nota: puedes elegir si la simulación parte de cartera líquida (modo base) o capital invertible ampliado
+(cartera líquida + equity de inmuebles invertibles - otras deudas). La vivienda habitual no se incluye en esa base.
 
 ### 2. **Dashboard de KPIs con Color-Coding Automático**
 
@@ -74,6 +80,13 @@ Tu plan se adapta a 4 dimensiones:
 📅 Comparación vs Objetivo
 "Muy cercano: Solo 1 año después de tu objetivo..."
 ```
+
+### 3.1 **Explicaciones para no técnicos**
+
+- Resumen inicial: qué hace la calculadora en 3 pasos.
+- Ayudas contextuales en sidebar para entender cada bloque de inputs.
+- Resumen de resultados en lenguaje simple (objetivo, plazo, probabilidad).
+- Explicaciones de cómo leer KPIs y gráficos.
 
 ### 4. **Gráficos Interactivos Plotly**
 
@@ -121,11 +134,21 @@ En despliegues cloud, evita introducir datos sensibles y revisa la política del
 - Monte Carlo normal.
 - Monte Carlo bootstrap histórico.
 - Backtesting histórico por ventanas móviles.
+- Selector de estrategia histórica para Bootstrap/Backtesting:
+  - `100% renta variable (histórica S&P 500 EE. UU.)`
+  - `70% renta variable / 30% renta fija`
+  - `50% renta variable / 50% renta fija`
+  - `30% renta variable / 70% renta fija`
+  - `15% renta variable / 85% renta fija`
+- Base metodológica:
+  - Histórico: tramo variable usando serie S&P 500 total return (EE. UU., 1871+).
+  - Sintético: carteras mixtas con fórmula `w_rv * retorno_rv_histórico + w_rf * 0.03`.
 - Aun así, siguen siendo aproximaciones y no cubren toda la complejidad de mercado.
 
 6. **Fiscalidad simplificada anual**
 - IRPF ahorro, Patrimonio e ISGF se aplican como drag anual aproximado.
 - No cubre toda la casuística personal/familiar de una liquidación real.
+- En modo "Jubilación", el objetivo FIRE se ajusta con una estimación de impuestos al retirar (aproximación).
 
 7. **Paridad CLI/Web**
 - Algunas capacidades del CLI aún no están expuestas en la web con el mismo nivel de detalle.

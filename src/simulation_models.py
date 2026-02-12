@@ -17,15 +17,41 @@ import pandas as pd
 from src.tax_engine import calculate_savings_tax, calculate_wealth_taxes
 
 
-MARKET_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "market_data" / "us_market_annual_returns_ff.csv"
+MARKET_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "market_data" / "strategy_returns_1871.csv"
+
+STRATEGY_COLUMN_MAP = {
+    "sp500_us_total_return": "sp500_us_total_return",
+    "portfolio_100_0_synthetic": "portfolio_100_0_synthetic",
+    "portfolio_70_30_synthetic": "portfolio_70_30_synthetic",
+    "portfolio_50_50_synthetic": "portfolio_50_50_synthetic",
+    "portfolio_30_70_synthetic": "portfolio_30_70_synthetic",
+    "portfolio_15_85_synthetic": "portfolio_15_85_synthetic",
+    "balanced_60_40_synthetic": "balanced_60_40_synthetic",
+    "conservative_40_60_synthetic": "conservative_40_60_synthetic",
+}
 
 
-def load_historical_annual_returns() -> np.ndarray:
-    """Load bundled historical annual returns as decimal values."""
+def load_historical_annual_returns(strategy: str = "sp500_us_total_return") -> np.ndarray:
+    """Load bundled historical annual returns as decimal values.
+
+    Parameters
+    ----------
+    strategy:
+        One of:
+        - sp500_us_total_return
+        - portfolio_100_0_synthetic
+        - portfolio_70_30_synthetic
+        - portfolio_50_50_synthetic
+        - portfolio_30_70_synthetic
+        - portfolio_15_85_synthetic
+        - balanced_60_40_synthetic
+        - conservative_40_60_synthetic
+    """
     df = pd.read_csv(MARKET_DATA_PATH)
-    if "annual_return" not in df.columns:
-        raise ValueError(f"Missing annual_return column in {MARKET_DATA_PATH}")
-    returns = df["annual_return"].astype(float).to_numpy()
+    column = STRATEGY_COLUMN_MAP.get(strategy, "sp500_us_total_return")
+    if column not in df.columns:
+        raise ValueError(f"Missing {column} column in {MARKET_DATA_PATH}")
+    returns = df[column].astype(float).to_numpy()
     if returns.size < 20:
         raise ValueError("Historical return series too short for robust analysis.")
     return returns

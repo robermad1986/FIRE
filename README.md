@@ -46,9 +46,11 @@ The source code is available on GitHub: [robermad1986/FIRE](https://github.com/r
 - **💰 Tax-Aware Targeting** — Calcula objetivo BRUTO considerando impuestos sobre plusvalías
 - **📊 Proyecciones de 10+ años** — Visualiza crecimiento de tu portafolio
 - **🎲 Monte Carlo Analysis** — 10,000 simulaciones → probabilidad de éxito realista
+- **🧪 Comparación de Modelos** — Normal vs Bootstrap vs Backtesting con selector de estrategia histórica
 - **🏠 Balance Completo** — Bienes raíces, hipotecas, deudas personales
 - **📈 KPIs Profesionales** — FIRE Number, Net Worth, Burning Rate, Savings Rate
 - **💵 Fiscalidad EUR/UCITS** — Impuestos sobre plusvalías, dividendos, intereses
+- **🎯 Enfoque Fiscal Flexible** — Prioriza acumulación o jubilación en la estimación del objetivo FIRE
 - **🎓 Explicaciones Contextuales** — Cada parámetro con ejemplos y consejos
 - **🌍 Soporte Multi-País** — Ajusta impuestos para tu país específico
 
@@ -76,7 +78,9 @@ The source code is available on GitHub: [robermad1986/FIRE](https://github.com/r
    El objetivo FIRE usa TRS/SWR configurable en ambas interfaces.
 
 5. **Modelo de mercado en transición (más robusto, aún simplificado)**  
-   La web soporta Monte Carlo normal, bootstrap histórico y backtesting por ventanas, pero sigue siendo una aproximación cuantitativa.
+   La web soporta Monte Carlo normal, bootstrap histórico y backtesting por ventanas.  
+   La serie histórica base es S&P 500 total return (EE. UU., 1871+) para el tramo de renta variable, con carteras sintéticas por composición:
+   100/0, 70/30, 50/50, 30/70 y 15/85 (RV/RF).
 
 6. **Impuestos modelados como aproximación anual**  
    IRPF ahorro + Patrimonio + ISGF se aplican como drag anual sobre la simulación. No cubre toda la casuística personal (mínimos familiares, deducciones específicas, etc.).

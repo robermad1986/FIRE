@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
 
 
 TAXPACK_DIR = Path(__file__).resolve().parent.parent / "data" / "taxpacks"
@@ -38,6 +39,29 @@ REGION_LABELS = {
     "pais-vasco-bizkaia": "País Vasco (Bizkaia)",
     "pais-vasco-gipuzkoa": "País Vasco (Gipuzkoa)",
 }
+
+# 17 CCAA coverage model. Basque Country is represented by its 3 foral territories.
+CCAA_REGION_KEY_GROUPS: Dict[str, List[str]] = {
+    "andalucia": ["andalucia"],
+    "aragon": ["aragon"],
+    "asturias": ["asturias"],
+    "illes-balears": ["illes-balears"],
+    "canarias": ["canarias"],
+    "cantabria": ["cantabria"],
+    "castilla-la-mancha": ["castilla-la-mancha"],
+    "castilla-y-leon": ["castilla-y-leon"],
+    "cataluna": ["cataluna"],
+    "comunitat-valenciana": ["comunitat-valenciana"],
+    "extremadura": ["extremadura"],
+    "galicia": ["galicia"],
+    "madrid": ["madrid"],
+    "murcia": ["murcia"],
+    "la-rioja": ["la-rioja"],
+    "navarra": ["navarra"],
+    "pais-vasco": ["pais-vasco-alava", "pais-vasco-bizkaia", "pais-vasco-gipuzkoa"],
+}
+
+FORAL_REGION_KEYS = ("navarra", "pais-vasco-alava", "pais-vasco-bizkaia", "pais-vasco-gipuzkoa")
 
 
 def list_available_taxpack_years(country: str = "es") -> List[int]:
@@ -280,4 +304,57 @@ def validate_tax_pack_metadata(tax_pack: Dict[str, Any]) -> List[str]:
     sources = meta.get("sources")
     if not isinstance(sources, list) or not sources:
         errors.append("meta.sources must be a non-empty list")
+    elif sources:
+        for idx, src in enumerate(sources):
+            if not isinstance(src, dict):
+                errors.append(f"meta.sources[{idx}] must be an object")
+                continue
+            if not src.get("title"):
+                errors.append(f"meta.sources[{idx}].title is required")
+            url = src.get("url", "")
+            if not isinstance(url, str) or not url.startswith("http"):
+                errors.append(f"meta.sources[{idx}].url must start with http/https")
+
+    for date_field in ("generatedAt", "lastReviewed"):
+        value = meta.get(date_field)
+        if value is None:
+            continue
+        try:
+            datetime.strptime(str(value), "%Y-%m-%d")
+        except ValueError:
+            errors.append(f"meta.{date_field} must use YYYY-MM-DD format")
+
+    errors.extend(validate_tax_pack_coverage(tax_pack))
+    return errors
+
+
+def validate_tax_pack_coverage(tax_pack: Dict[str, Any]) -> List[str]:
+    """Validate minimum coverage for 17 CCAA and fiscal regimes."""
+    errors: List[str] = []
+
+    autonomous = tax_pack.get("irpf", {}).get("general", {}).get("autonomousBracketsByRegion", {})
+    wealth_regions = tax_pack.get("wealth", {}).get("regions", {})
+    foral_general = tax_pack.get("irpf", {}).get("foral", {}).get("bracketsByRegion", {})
+    foral_savings = tax_pack.get("irpf", {}).get("foral", {}).get("savingsBracketsByRegion", {})
+
+    # Check 17 CCAA coverage in common components (autonomous IRPF + wealth).
+    for ccaa, key_group in CCAA_REGION_KEY_GROUPS.items():
+        missing_autonomous = [k for k in key_group if k not in autonomous]
+        if missing_autonomous:
+            errors.append(
+                f"Missing IRPF autonomous coverage for CCAA '{ccaa}': {', '.join(missing_autonomous)}"
+            )
+        missing_wealth = [k for k in key_group if k not in wealth_regions]
+        if missing_wealth:
+            errors.append(
+                f"Missing wealth tax coverage for CCAA '{ccaa}': {', '.join(missing_wealth)}"
+            )
+
+    # Foral regime coverage for Navarra + Basque territories.
+    for key in FORAL_REGION_KEYS:
+        if key not in foral_general:
+            errors.append(f"Missing foral IRPF general brackets for '{key}'")
+        if key not in foral_savings:
+            errors.append(f"Missing foral IRPF savings brackets for '{key}'")
+
     return errors

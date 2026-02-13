@@ -2047,6 +2047,7 @@ def render_sensitivity_analysis(params: Dict) -> None:
     inflation_offsets = [-2, -1, 0, 1, 2]  # % points
 
     sensitivity_matrix = np.zeros((len(inflation_offsets), len(return_offsets)))
+    reachability_matrix = np.zeros((len(inflation_offsets), len(return_offsets)), dtype=bool)
 
     for i, inf_offset in enumerate(inflation_offsets):
         for j, ret_offset in enumerate(return_offsets):
@@ -2067,6 +2068,7 @@ def render_sensitivity_analysis(params: Dict) -> None:
                     years_to_target = year
                     break
 
+            reachability_matrix[i, j] = years_to_target is not None
             sensitivity_matrix[i, j] = (
                 years_to_target if years_to_target else years_horizon
             )
@@ -2119,10 +2121,18 @@ def render_sensitivity_analysis(params: Dict) -> None:
         min_years = sensitivity_matrix.min()
         max_years = sensitivity_matrix.max()
         range_years = max_years - min_years
+        total_scenarios = sensitivity_matrix.size
+        reached_scenarios = int(reachability_matrix.sum())
+        center_i = inflation_offsets.index(0)
+        center_j = return_offsets.index(0)
+        base_reachable = bool(reachability_matrix[center_i, center_j])
         
         with st.expander("📊 Interpretación de resultados", expanded=False):
             st.write(
                 f"**Rango observado:** {min_years:.0f} a {max_years:.0f} años (~{range_years:.0f} años de variación)"
+            )
+            st.write(
+                f"**Escenarios alcanzables en la matriz:** {reached_scenarios}/{total_scenarios}"
             )
             st.write(
                 "**Verde (<15 años):** Escenario optimista - Alcanzable en corto plazo"
@@ -2136,7 +2146,22 @@ def render_sensitivity_analysis(params: Dict) -> None:
     
     with sensitivity_col2:
         # Dynamic message about sensitivity
-        if range_years < 10:
+        if reached_scenarios == 0:
+            st.error(
+                "🔴 **No alcanzable en la matriz de sensibilidad.** Ninguno de los escenarios "
+                "de rentabilidad/inflación llega a FIRE en el horizonte actual."
+            )
+        elif not base_reachable:
+            st.warning(
+                f"⚠️ **Escenario base no alcanzable.** Aunque {reached_scenarios}/{total_scenarios} "
+                "escenarios alternativos sí llegan, tu configuración base no alcanza FIRE."
+            )
+        elif reached_scenarios < total_scenarios:
+            st.info(
+                f"📌 **Alcanzable solo en parte de escenarios.** {reached_scenarios}/{total_scenarios} "
+                "combinaciones de rentabilidad/inflación alcanzan FIRE en horizonte."
+            )
+        elif range_years < 10:
             st.success(
                 f"✅ **Tu plan es robusto.** Variaciones de rentabilidad/inflación solo mueven "
                 f"el timeline en {range_years:.1f} años. Eres resiliente a cambios de mercado."

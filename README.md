@@ -76,6 +76,7 @@ para estimar el gasto neto que debe cubrir la cartera en jubilación. Además, e
 
 2. **Cobertura fiscal española dependiente de Tax Pack**  
    La web usa reglas versionadas por año (`Tax Pack`). Si la norma cambia, hay que actualizar el pack para mantener precisión.
+   Validación técnica recomendada antes de cambios fiscales: `python3 scripts/validate_taxpack.py --year 2026 --country es`.
 
 3. **Cobertura temporal actual del pack: 2026**  
    En el estado actual del repo, el pack integrado es `ES-2026`.

@@ -1295,10 +1295,16 @@ def render_sidebar() -> Dict:
             "Nota: se usa renta bruta como aproximación. No modela en detalle gastos deducibles, vacancia ni IRPF inmobiliario."
         )
 
-    with st.sidebar.expander("🧓 Modelo de retiro en 2 tramos (opcional)", expanded=False):
+    with st.sidebar.expander("🧓 Pensión y retiro en 2 tramos (opcional)", expanded=False):
+        include_pension_in_simulation = st.checkbox(
+            "Incluir planes/pensión en simulación",
+            value=False,
+            help="Si está desactivado, la simulación no tendrá en cuenta pensión ni planes.",
+        )
         two_stage_retirement_model = st.checkbox(
             "Activar tramo pre-pensión y tramo post-pensión",
             value=False,
+            disabled=not include_pension_in_simulation,
             help=(
                 "Permite modelar una etapa desde FIRE hasta la edad de pensión con retirada más alta "
                 "y otra etapa posterior con menor retirada de cartera por efecto de la pensión."
@@ -1310,30 +1316,62 @@ def render_sidebar() -> Dict:
             max_value=100,
             value=67,
             step=1,
-            disabled=not two_stage_retirement_model,
+            disabled=not include_pension_in_simulation,
         )
-        pension_neta_anual = st.number_input(
-            "Pensión neta anual esperada (€ de hoy)",
+        pension_publica_neta_anual = st.number_input(
+            "Pensión pública neta anual esperada (€ de hoy)",
             min_value=0,
             max_value=200_000,
             value=0,
             step=1_000,
-            disabled=not two_stage_retirement_model,
+            disabled=not include_pension_in_simulation,
         )
+        plan_pensiones_privado_neto_anual = st.number_input(
+            "Plan de pensiones privado neto anual (€ de hoy)",
+            min_value=0,
+            max_value=200_000,
+            value=0,
+            step=1_000,
+            disabled=not include_pension_in_simulation,
+        )
+        otras_rentas_post_jubilacion_netas = st.number_input(
+            "Otras rentas netas post-jubilación (€ de hoy)",
+            min_value=0,
+            max_value=200_000,
+            value=0,
+            step=500,
+            disabled=not include_pension_in_simulation,
+            help="Ingresos recurrentes netos esperados que reduzcan la retirada de cartera.",
+        )
+        pension_neta_anual = (
+            pension_publica_neta_anual
+            + plan_pensiones_privado_neto_anual
+            + otras_rentas_post_jubilacion_netas
+        )
+        pension_neta_anual = pension_neta_anual if include_pension_in_simulation else 0.0
+
         coste_pre_pension_anual = st.number_input(
             "Coste anual extra pre-pensión (€ de hoy)",
             min_value=0,
             max_value=200_000,
             value=0,
             step=500,
-            disabled=not two_stage_retirement_model,
+            disabled=not include_pension_in_simulation or not two_stage_retirement_model,
             help="Ejemplo: coste de cotizaciones voluntarias o gasto adicional temporal antes de pensión.",
         )
-        if two_stage_retirement_model:
+        if include_pension_in_simulation:
+            st.caption(
+                f"Ingreso neto total considerado post-jubilación: €{pension_neta_anual:,.0f}/año."
+            )
+        if two_stage_retirement_model and include_pension_in_simulation:
             st.caption(
                 "En decumulación, tramo 1 = FIRE→pensión; tramo 2 = post-pensión. "
                 "La pensión reduce la retirada que debe cubrir la cartera."
             )
+        two_stage_retirement_model = bool(include_pension_in_simulation and two_stage_retirement_model)
+        if not include_pension_in_simulation:
+            pension_neta_anual = 0.0
+            coste_pre_pension_anual = 0.0
 
     st.sidebar.divider()
 
@@ -1547,9 +1585,13 @@ def render_sidebar() -> Dict:
         "usar_capital_invertible_ampliado": usar_capital_invertible_ampliado,
         "renta_bruta_alquiler_anual": renta_bruta_alquiler_anual,
         "incluir_rentas_alquiler_en_simulacion": incluir_rentas_alquiler_en_simulacion,
+        "include_pension_in_simulation": include_pension_in_simulation,
         "two_stage_retirement_model": two_stage_retirement_model,
         "edad_pension_oficial": edad_pension_oficial,
         "pension_neta_anual": pension_neta_anual,
+        "pension_publica_neta_anual": pension_publica_neta_anual,
+        "plan_pensiones_privado_neto_anual": plan_pensiones_privado_neto_anual,
+        "otras_rentas_post_jubilacion_netas": otras_rentas_post_jubilacion_netas,
         "coste_pre_pension_anual": coste_pre_pension_anual,
         # Compatibilidad con lógica previa
         "usar_patrimonio_neto_en_simulacion": usar_capital_invertible_ampliado,

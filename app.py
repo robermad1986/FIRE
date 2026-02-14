@@ -376,9 +376,10 @@ def validate_inputs(params: Dict) -> Tuple[bool, List[str]]:
     if params["aportacion_mensual"] > max_monthly:
         errors.append(f"❌ Aportación mensual máxima: €{max_monthly:,.0f}")
 
-    if params.get("two_stage_retirement_model") and params.get("edad_pension_oficial", 67) < params["edad_objetivo"]:
+    pension_start_age = params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67))
+    if params.get("two_stage_retirement_model") and pension_start_age < params["edad_objetivo"]:
         warnings.append(
-            "⚠️  Edad de pensión menor que edad objetivo FIRE. El tramo pre-pensión quedará en 0 años."
+            "⚠️  Edad de inicio de pensión menor que edad objetivo FIRE. El tramo pre-pensión quedará en 0 años."
         )
 
     return len(errors) == 0, errors + warnings
@@ -725,6 +726,76 @@ def build_decumulation_table_two_stage(
     return pd.DataFrame(rows)
 
 
+def build_decumulation_table_two_stage_schedule(
+    starting_portfolio: float,
+    fire_age: int,
+    years_in_retirement: int,
+    annual_spending_base: float,
+    pension_public_start_age: int,
+    pension_public_net_annual: float,
+    plan_private_start_age: int,
+    plan_private_duration_years: int,
+    plan_private_net_annual: float,
+    other_income_post_pension_annual: float,
+    pre_pension_extra_cost_annual: float,
+    expected_return: float,
+    inflation_rate: float,
+    tax_rate_on_gains: float,
+) -> pd.DataFrame:
+    """Two-stage decumulation with explicit public/private pension schedule."""
+    rows: List[Dict[str, float]] = []
+    portfolio = float(max(0.0, starting_portfolio))
+    inflation_factor = 1.0
+    plan_private_end_age = plan_private_start_age + max(0, plan_private_duration_years) - 1
+
+    for year in range(1, years_in_retirement + 1):
+        age = fire_age + year - 1
+        tramo = "Pre-pensión" if age < pension_public_start_age else "Post-pensión"
+
+        income_public = pension_public_net_annual if age >= pension_public_start_age else 0.0
+        income_private = (
+            plan_private_net_annual
+            if plan_private_duration_years > 0 and plan_private_start_age <= age <= plan_private_end_age
+            else 0.0
+        )
+        income_other = other_income_post_pension_annual if age >= pension_public_start_age else 0.0
+        extra_cost = pre_pension_extra_cost_annual if age < pension_public_start_age else 0.0
+
+        annual_need_from_portfolio = max(
+            0.0,
+            annual_spending_base + extra_cost - income_public - income_private - income_other,
+        )
+
+        capital_inicial = portfolio
+        retirada = annual_need_from_portfolio * inflation_factor
+        growth_gross = capital_inicial * expected_return
+        tax_growth = max(0.0, growth_gross) * max(0.0, tax_rate_on_gains)
+        growth_net = growth_gross - tax_growth
+        capital_final = max(0.0, capital_inicial + growth_net - retirada)
+
+        rows.append(
+            {
+                "Año jubilación": year,
+                "Edad": age,
+                "Tramo": tramo,
+                "Ingreso pensión pública (€)": income_public * inflation_factor,
+                "Ingreso plan privado (€)": income_private * inflation_factor,
+                "Otras rentas (€)": income_other * inflation_factor,
+                "Coste extra pre-pensión (€)": extra_cost * inflation_factor,
+                "Capital inicial (€)": capital_inicial,
+                "Retirada anual (€)": retirada,
+                "Crecimiento neto (€)": growth_net,
+                "Capital final (€)": capital_final,
+                "Capital agotado": capital_final <= 0,
+            }
+        )
+
+        portfolio = capital_final
+        inflation_factor *= (1 + inflation_rate)
+
+    return pd.DataFrame(rows)
+
+
 def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     """Render retirement capital-spending table."""
     st.subheader("🪙 Gasto de capital en jubilación")
@@ -759,9 +830,15 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     stage1_years = 0
     annual_withdrawal_stage1 = annual_withdrawal_base
     annual_withdrawal_stage2 = annual_withdrawal_base
+    pension_public_start_age = int(params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67)))
+    plan_private_start_age = int(params.get("edad_inicio_plan_privado", pension_public_start_age))
+    plan_private_duration_years = int(params.get("duracion_plan_privado_anos", 0))
+    plan_private_net_annual = float(params.get("plan_pensiones_privado_neto_anual", 0.0))
+    pension_public_net_annual = float(params.get("pension_publica_neta_anual_efectiva", 0.0))
+    other_income_post = float(params.get("otras_rentas_post_jubilacion_netas", 0.0))
     if two_stage_enabled:
         fire_age = params["edad_objetivo"]
-        pension_age = params.get("edad_pension_oficial", 67)
+        pension_age = pension_public_start_age
         stage1_years = max(0, pension_age - fire_age)
         annual_withdrawal_stage1 = max(
             0.0,
@@ -775,12 +852,18 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     dec_tables: Dict[str, pd.DataFrame] = {}
     for label, start_portfolio in starting_portfolios.items():
         if two_stage_enabled:
-            dec_tables[label] = build_decumulation_table_two_stage(
+            dec_tables[label] = build_decumulation_table_two_stage_schedule(
                 starting_portfolio=start_portfolio,
-                annual_withdrawal_stage1=annual_withdrawal_stage1,
-                annual_withdrawal_stage2=annual_withdrawal_stage2,
-                stage1_years=stage1_years,
+                fire_age=params["edad_objetivo"],
                 years_in_retirement=years_in_retirement,
+                annual_spending_base=annual_withdrawal_base,
+                pension_public_start_age=pension_public_start_age,
+                pension_public_net_annual=pension_public_net_annual,
+                plan_private_start_age=plan_private_start_age,
+                plan_private_duration_years=plan_private_duration_years,
+                plan_private_net_annual=plan_private_net_annual,
+                other_income_post_pension_annual=other_income_post,
+                pre_pension_extra_cost_annual=float(params.get("coste_pre_pension_anual", 0.0)),
                 expected_return=params["rentabilidad_neta_simulacion"],
                 inflation_rate=params["inflacion"],
                 tax_rate_on_gains=tax_rate_hint,
@@ -809,7 +892,8 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
         col.metric(f"Capital inicio ({label})", f"€{starting_portfolios[label]:,.0f}")
 
     col_e, col_f = st.columns(2)
-    col_e.metric("Retirada anual inicial", f"€{annual_withdrawal_base:,.0f}")
+    retirada_inicial = float(dec_tables["P50"].iloc[0]["Retirada anual (€)"]) if not dec_tables["P50"].empty else 0.0
+    col_e.metric("Retirada anual inicial", f"€{retirada_inicial:,.0f}")
     col_f.metric(
         "Diferencia capital inicial (P95 - P5)",
         f"€{(starting_portfolios['P95'] - starting_portfolios['P5']):,.0f}",
@@ -829,15 +913,22 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     tabs = st.tabs(tab_labels)
     for tab, label in zip(tabs, percentile_series.keys()):
         with tab:
+            format_map = {
+                "Capital inicial (€)": "€{:,.0f}",
+                "Retirada anual (€)": "€{:,.0f}",
+                "Crecimiento neto (€)": "€{:,.0f}",
+                "Capital final (€)": "€{:,.0f}",
+            }
+            for optional_col in (
+                "Ingreso pensión pública (€)",
+                "Ingreso plan privado (€)",
+                "Otras rentas (€)",
+                "Coste extra pre-pensión (€)",
+            ):
+                if optional_col in dec_tables[label].columns:
+                    format_map[optional_col] = "€{:,.0f}"
             st.dataframe(
-                dec_tables[label].style.format(
-                    {
-                        "Capital inicial (€)": "€{:,.0f}",
-                        "Retirada anual (€)": "€{:,.0f}",
-                        "Crecimiento neto (€)": "€{:,.0f}",
-                        "Capital final (€)": "€{:,.0f}",
-                    }
-                ),
+                dec_tables[label].style.format(format_map),
                 width="stretch",
                 hide_index=True,
             )
@@ -846,8 +937,11 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
         if two_stage_enabled:
             st.write(
                 "- Capital inicial: percentiles 5, 25, 50, 75 y 95 al final del horizonte de acumulación.\n"
-                f"- Tramo pre-pensión: {stage1_years} años con retirada base de €{annual_withdrawal_stage1:,.0f}/año.\n"
-                f"- Tramo post-pensión: retirada neta de cartera de €{annual_withdrawal_stage2:,.0f}/año.\n"
+                f"- Tramo pre-pensión: {stage1_years} años (hasta edad {pension_public_start_age}).\n"
+                f"- Pensión pública neta: €{pension_public_net_annual:,.0f}/año desde {pension_public_start_age}.\n"
+                f"- Plan privado neto: €{plan_private_net_annual:,.0f}/año desde {plan_private_start_age} "
+                f"durante {plan_private_duration_years} años.\n"
+                f"- Otras rentas post-pensión: €{other_income_post:,.0f}/año.\n"
                 "- Ambos tramos se actualizan por inflación año a año.\n"
                 f"- Retorno anual usado: {params['rentabilidad_neta_simulacion']*100:.2f}%.\n"
                 f"- Impuesto orientativo sobre crecimiento: {tax_rate_hint*100:.1f}%.\n"
@@ -1312,13 +1406,31 @@ def render_sidebar() -> Dict:
             ),
         )
         edad_pension_oficial = st.slider(
-            "Edad de pensión",
+            "Edad legal de pensión (referencia)",
             min_value=50,
             max_value=100,
             value=67,
             step=1,
             disabled=not include_pension_in_simulation,
         )
+        edad_inicio_pension_publica = st.slider(
+            "Edad de inicio de pensión pública",
+            min_value=50,
+            max_value=100,
+            value=67,
+            step=1,
+            disabled=not include_pension_in_simulation,
+            help="Permite retrasar la pensión pública respecto a la edad legal.",
+        )
+        bonificacion_demora_pct = st.slider(
+            "Bonificación anual por demora de pensión pública (%)",
+            min_value=0.0,
+            max_value=8.0,
+            value=4.0,
+            step=0.5,
+            disabled=not include_pension_in_simulation,
+            help="Porcentaje anual acumulado por cada año de demora de la pensión pública.",
+        ) / 100.0
         pension_publica_neta_anual = st.number_input(
             "Pensión pública neta anual esperada (€ de hoy)",
             min_value=0,
@@ -1326,6 +1438,37 @@ def render_sidebar() -> Dict:
             value=0,
             step=1_000,
             disabled=not include_pension_in_simulation,
+        )
+        years_delay = max(0, edad_inicio_pension_publica - edad_pension_oficial)
+        pension_publica_neta_anual_efectiva = pension_publica_neta_anual * (
+            1 + (bonificacion_demora_pct * years_delay)
+        )
+        if include_pension_in_simulation and years_delay > 0:
+            st.caption(
+                f"Pensión pública ajustada por demora ({years_delay} años): €{pension_publica_neta_anual_efectiva:,.0f}/año."
+            )
+        elif include_pension_in_simulation:
+            st.caption(
+                f"Pensión pública usada en simulación: €{pension_publica_neta_anual_efectiva:,.0f}/año."
+            )
+
+        edad_inicio_plan_privado = st.slider(
+            "Edad de inicio del plan privado",
+            min_value=50,
+            max_value=100,
+            value=63,
+            step=1,
+            disabled=not include_pension_in_simulation,
+            help="Permite rescatar plan privado antes o después de la pensión pública.",
+        )
+        duracion_plan_privado_anos = st.slider(
+            "Duración del plan privado (años)",
+            min_value=0,
+            max_value=40,
+            value=0,
+            step=1,
+            disabled=not include_pension_in_simulation,
+            help="Años durante los que se cobra el plan privado (0 = no se cobra).",
         )
         plan_pensiones_privado_neto_anual = st.number_input(
             "Plan de pensiones privado neto anual (€ de hoy)",
@@ -1345,7 +1488,7 @@ def render_sidebar() -> Dict:
             help="Ingresos recurrentes netos esperados que reduzcan la retirada de cartera.",
         )
         pension_neta_anual = (
-            pension_publica_neta_anual
+            pension_publica_neta_anual_efectiva
             + plan_pensiones_privado_neto_anual
             + otras_rentas_post_jubilacion_netas
         )
@@ -1589,8 +1732,13 @@ def render_sidebar() -> Dict:
         "include_pension_in_simulation": include_pension_in_simulation,
         "two_stage_retirement_model": two_stage_retirement_model,
         "edad_pension_oficial": edad_pension_oficial,
+        "edad_inicio_pension_publica": edad_inicio_pension_publica,
+        "bonificacion_demora_pct": bonificacion_demora_pct,
         "pension_neta_anual": pension_neta_anual,
         "pension_publica_neta_anual": pension_publica_neta_anual,
+        "pension_publica_neta_anual_efectiva": pension_publica_neta_anual_efectiva,
+        "edad_inicio_plan_privado": edad_inicio_plan_privado,
+        "duracion_plan_privado_anos": duracion_plan_privado_anos,
         "plan_pensiones_privado_neto_anual": plan_pensiones_privado_neto_anual,
         "otras_rentas_post_jubilacion_netas": otras_rentas_post_jubilacion_netas,
         "coste_pre_pension_anual": coste_pre_pension_anual,
@@ -1815,17 +1963,60 @@ def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
                 params.get("two_stage_retirement_model", False)
                 and params.get("include_pension_in_simulation", False)
             )
+            fire_age = int(params.get("edad_objetivo", 0))
+            pension_start_age = int(
+                params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67))
+            )
+            private_start_age = int(params.get("edad_inicio_plan_privado", pension_start_age))
+            private_duration = int(params.get("duracion_plan_privado_anos", 0))
+            private_end_age = private_start_age + private_duration - 1
+
+            def income_general_for_age(age: int) -> float:
+                if not params.get("include_pension_in_simulation", False):
+                    return 0.0
+                income_public = (
+                    float(params.get("pension_publica_neta_anual_efectiva", 0.0))
+                    if age >= pension_start_age
+                    else 0.0
+                )
+                income_private = (
+                    float(params.get("plan_pensiones_privado_neto_anual", 0.0))
+                    if private_duration > 0 and private_start_age <= age <= private_end_age
+                    else 0.0
+                )
+                income_other = (
+                    float(params.get("otras_rentas_post_jubilacion_netas", 0.0))
+                    if age >= pension_start_age
+                    else 0.0
+                )
+                return income_public + income_private + income_other
 
             stage_rows: List[Dict[str, Any]] = []
             if use_two_stage:
                 pre_extra = float(params.get("coste_pre_pension_anual", 0.0))
-                pension_net = float(params.get("pension_neta_anual", 0.0))
+                pre_general_income = income_general_for_age(fire_age)
+                post_general_income = income_general_for_age(max(fire_age, pension_start_age))
                 stage_inputs = [
-                    ("Pre-pensión", net_spending_base + pre_extra, 0.0),
-                    ("Post-pensión", max(0.0, net_spending_base - pension_net), pension_net),
+                    (
+                        "Pre-pensión",
+                        max(0.0, net_spending_base + pre_extra - pre_general_income),
+                        pre_general_income,
+                    ),
+                    (
+                        "Post-pensión",
+                        max(0.0, net_spending_base - post_general_income),
+                        post_general_income,
+                    ),
                 ]
             else:
-                stage_inputs = [("Retiro (único tramo)", net_spending_base, 0.0)]
+                single_general_income = income_general_for_age(fire_age)
+                stage_inputs = [
+                    (
+                        "Retiro (único tramo)",
+                        max(0.0, net_spending_base - single_general_income),
+                        single_general_income,
+                    )
+                ]
 
             for stage_name, net_from_portfolio, base_general in stage_inputs:
                 taxable_base_stage = max(0.0, net_from_portfolio * taxable_ratio)

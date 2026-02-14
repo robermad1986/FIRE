@@ -59,6 +59,9 @@ Nota de consistencia reciente (web): la explicación del objetivo FIRE en el pan
 
 Actualización reciente (web): ahora puedes incorporar **renta bruta anual por alquileres** y un **ajuste anual de gasto por vivienda habitual**
 para estimar el gasto neto que debe cubrir la cartera en jubilación. Además, el bloque de decumulación muestra escenarios `P5/P25/P50/P75/P95`.
+Actualización reciente (web): se añade bloque de **acumulación pre-FIRE**, persistencia de perfil por **JSON**, export **CSV+JSON** y modo fiscal
+**Internacional básico** para acumulación fuera de España (aproximación).
+También incluye toggle para ocultar/mostrar panel de control, mejoras de lectura en dark mode móvil y flujo de impresión PDF nativo del navegador.
 
 ### 🧪 Validación Exhaustiva
 
@@ -90,7 +93,8 @@ para estimar el gasto neto que debe cubrir la cartera en jubilación. Además, e
    100/0, 70/30, 50/50, 30/70 y 15/85 (RV/RF).
 
 6. **Impuestos modelados como aproximación anual**  
-   IRPF ahorro + Patrimonio + ISGF se aplican como drag anual sobre la simulación. No cubre toda la casuística personal (mínimos familiares, deducciones específicas, etc.).
+IRPF ahorro + Patrimonio + ISGF se aplican como drag anual sobre la simulación. No cubre toda la casuística personal (mínimos familiares, deducciones específicas, etc.).
+En modo internacional básico se usan tasas efectivas manuales y no reglas fiscales detalladas país por país.
 
 7. **Paridad funcional CLI/Web en progreso**  
    Se ha avanzado en paridad (SWR, modelos), pero hay diferencias de UX y profundidad en algunos flujos.

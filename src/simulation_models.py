@@ -9,7 +9,7 @@ Supports:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -55,6 +55,36 @@ def load_historical_annual_returns(strategy: str = "sp500_us_total_return") -> n
     if returns.size < 20:
         raise ValueError("Historical return series too short for robust analysis.")
     return returns
+
+
+def load_historical_annual_series(
+    strategy: str = "sp500_us_total_return",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load yearly series with calendar years and months_observed quality signal.
+
+    Returns
+    -------
+    years: np.ndarray[int]
+    returns: np.ndarray[float]
+    months_observed: np.ndarray[int]
+    """
+    df = pd.read_csv(MARKET_DATA_PATH)
+    column = STRATEGY_COLUMN_MAP.get(strategy, "sp500_us_total_return")
+    if column not in df.columns:
+        raise ValueError(f"Missing {column} column in {MARKET_DATA_PATH}")
+    if "year" not in df.columns:
+        raise ValueError(f"Missing year column in {MARKET_DATA_PATH}")
+
+    years = df["year"].astype(int).to_numpy()
+    returns = df[column].astype(float).to_numpy()
+    months_observed = (
+        df["months_observed"].astype(int).to_numpy()
+        if "months_observed" in df.columns
+        else np.full_like(years, 12)
+    )
+    if returns.size < 20:
+        raise ValueError("Historical return series too short for robust analysis.")
+    return years, returns, months_observed
 
 
 def _simulate_from_return_matrix(
@@ -106,6 +136,11 @@ def _simulate_from_return_matrix(
         [(real_paths[:, y] >= fire_target_real).sum() / n_sims * 100 for y in range(years + 1)]
     )
 
+    # Path-level geometric annual returns from market return matrix (independent of contributions).
+    safe_returns = np.clip(annual_returns_matrix.astype(float), -0.99, None)
+    with np.errstate(invalid="ignore"):
+        path_geom_returns = np.exp(np.mean(np.log1p(safe_returns), axis=1)) - 1.0
+
     return {
         "paths": annual_paths,
         "real_paths": real_paths,
@@ -130,6 +165,14 @@ def _simulate_from_return_matrix(
         "fire_target": fire_target_real,
         "n_sims": n_sims,
         "years": years,
+        "path_geom_returns": path_geom_returns,
+        "path_return_percentiles": {
+            "P5": float(np.percentile(path_geom_returns, 5)),
+            "P25": float(np.percentile(path_geom_returns, 25)),
+            "P50": float(np.percentile(path_geom_returns, 50)),
+            "P75": float(np.percentile(path_geom_returns, 75)),
+            "P95": float(np.percentile(path_geom_returns, 95)),
+        },
     }
 
 
@@ -202,6 +245,8 @@ def backtest_rolling_windows(
     annual_spending: float,
     safe_withdrawal_rate: float,
     historical_returns: np.ndarray,
+    historical_years: Optional[np.ndarray] = None,
+    historical_months_observed: Optional[np.ndarray] = None,
     contribution_growth_rate: float = 0.0,
     tax_pack: Optional[Dict] = None,
     region: Optional[str] = None,
@@ -229,4 +274,53 @@ def backtest_rolling_windows(
         region=region,
     )
     result["windows_count"] = return_matrix.shape[0]
+
+    final_real = result["real_paths"][:, -1]
+    final_nominal = result["paths"][:, -1]
+    worst_idx = int(np.argmin(final_real))
+    best_idx = int(np.argmax(final_real))
+
+    worst_start_year = None
+    worst_end_year = None
+    best_start_year = None
+    best_end_year = None
+    data_start_year = None
+    data_end_year = None
+    min_months_observed = None
+    avg_months_observed = None
+
+    if historical_years is not None and historical_years.size >= years:
+        data_start_year = int(historical_years[0])
+        data_end_year = int(historical_years[-1])
+        worst_start_year = int(historical_years[worst_idx])
+        worst_end_year = int(historical_years[worst_idx + years - 1])
+        best_start_year = int(historical_years[best_idx])
+        best_end_year = int(historical_years[best_idx + years - 1])
+
+    if historical_months_observed is not None and historical_months_observed.size >= years:
+        min_months_observed = int(np.min(historical_months_observed))
+        avg_months_observed = float(np.mean(historical_months_observed))
+
+    result["backtest_diagnostics"] = {
+        "windows_count": int(return_matrix.shape[0]),
+        "data_start_year": data_start_year,
+        "data_end_year": data_end_year,
+        "worst_window_start_year": worst_start_year,
+        "worst_window_end_year": worst_end_year,
+        "best_window_start_year": best_start_year,
+        "best_window_end_year": best_end_year,
+        "worst_final_real": float(final_real[worst_idx]),
+        "best_final_real": float(final_real[best_idx]),
+        "worst_final_nominal": float(final_nominal[worst_idx]),
+        "best_final_nominal": float(final_nominal[best_idx]),
+        "worst_idx": worst_idx,
+        "best_idx": best_idx,
+        "min_months_observed": min_months_observed,
+        "avg_months_observed": avg_months_observed,
+    }
+    result["worst_path_nominal"] = result["paths"][worst_idx].copy()
+    result["best_path_nominal"] = result["paths"][best_idx].copy()
+    result["worst_path_real"] = result["real_paths"][worst_idx].copy()
+    result["best_path_real"] = result["real_paths"][best_idx].copy()
+
     return result

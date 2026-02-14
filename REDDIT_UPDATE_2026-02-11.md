@@ -1,41 +1,48 @@
-# Update del proyecto FIRE (11 Feb 2026)
+# Update del proyecto FIRE (14 Feb 2026)
 
-Hola a todos, gracias por el feedback del hilo. He aplicado una ronda grande de mejoras P0/P1:
+Gracias por todo el feedback del hilo. Esta iteración se ha centrado en precisión del modelo, UX y estabilidad web.
 
-## Qué se ha mejorado
+## Cambios ya implementados
 
-1. Fiscalidad por CCAA más trazable
-- Añadido desglose auditable de cálculo fiscal en la web (base, tramos y cuota para IRPF ahorro + Patrimonio + ISGF).
-- Tax Pack con validación de metadatos mínimos y fecha de revisión.
+1. Inputs y UX (web)
+- Inputs exactos en campos clave de importe (patrimonio, aportación, cuotas), ocultando la barra cuando activas modo exacto.
+- Carga de perfil JSON en sidebar (flujo de carga limpio y sin duplicar export).
+- Reordenación/pulido visual de panel y bloques de resultados.
+- Comparador A/B en resultados: guardas un escenario base y comparas contra el actual.
 
-2. Modelos de simulación más robustos
-- Ya no solo Monte Carlo normal.
-- Añadidos:
-  - Monte Carlo con bootstrap histórico.
-  - Backtesting histórico por ventanas móviles.
+2. Persistencia y exportes
+- Perfil y escenario exportables en JSON.
+- CSV mantenido para seguimiento.
+- Botón de imprimir/guardar PDF vía navegador estabilizado.
 
-3. Paridad CLI/Web (avance real)
-- SWR ahora configurable también en la web (antes estaba fija en 4% en objetivo base).
-- Comparativa de modelos añadida en CLI.
+3. Fiscalidad
+- Modo fiscal `España (Tax Pack)` + `Internacional básico`.
+- Ajuste del modelo internacional básico para evitar drag irreal (ya no resta el tipo como porcentaje anual de toda la cartera).
 
-4. Documentación y límites
-- Documentadas limitaciones importantes y pendientes reales.
-- Backlog priorizado P0/P1/P2 publicado en el repo.
+4. Simulación y backtesting
+- Monte Carlo normal + bootstrap histórico + backtesting histórico en ventanas.
+- Añadidos indicadores de fidelidad en backtesting (ventanas evaluadas, rango histórico y cobertura mensual).
+- En gráficos de backtesting: marcado de ventana crítica (peor) y favorable (mejor), con lectura de impacto.
+- KPI de riesgo de secuencia (brecha entre ventana crítica y favorable).
 
-## Qué sigue pendiente
+5. Jubilación / gasto de capital
+- Tabla de gasto de capital con orden de columnas fijo y chequeo de flujo contable por fila.
+- Correcciones para alinear mejor escenarios P5–P95 y trazabilidad del retorno implícito usado por escenario.
+- Mini-KPI por pestaña con “retorno anual implícito usado”.
 
-- Validación jurídica/fiscal externa por CCAA (más allá del motor técnico).
-- Automatización completa de actualización anual del Tax Pack.
-- Backtesting de cartera multi-activo personalizable con rebalanceo.
-- Export detallado por ventana histórica.
-- Tests de paridad end-to-end CLI vs web.
-- Refactor para reducir complejidad de `app.py`/`cli.py`.
+6. Robustez técnica
+- Correcciones de estados de Streamlit (incluyendo cargas de perfil y recálculo).
+- Corrección de bugs detectados moviendo sliders / interacciones rápidas.
+- Suite de tests ampliada en módulos fiscales, perfiles y modelos.
 
-## Nota importante
+## Limitaciones que siguen vigentes
 
-Sigue siendo una herramienta educativa de planificación, no asesoría fiscal o legal.
+- Sigue siendo un simulador educativo de planificación, no asesoría fiscal/legal personalizada.
+- El modo internacional básico es una aproximación agregada (no sustituye un motor fiscal país-a-país).
+- Faltan más casos de validación externa para normativa fiscal regional y escenarios complejos de retiro.
 
-Si queréis, el siguiente foco lo pongo en:
-1) export detallado de backtesting,
-2) refactor técnico,
-3) validación de casos fiscales canónicos por CCAA.
+## Próximos focos propuestos
+
+1. Mejorar precisión fiscal pre/post pensión con más casuísticas reales.
+2. Seguir reduciendo deuda técnica y complejidad de `app.py`/`src/cli.py`.
+3. Mayor paridad funcional CLI/web en bloques avanzados y pruebas end-to-end.

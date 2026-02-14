@@ -51,6 +51,12 @@ Desplegar en **Streamlit Cloud** con un solo click: [Abrir en línea]() *(en des
   - permite descontar un ahorro anual estimado del gasto que debe cubrir la cartera.
 - Gestión del capital en jubilación ampliada a percentiles:
   - `P5`, `P25`, `P50`, `P75`, `P95`.
+- Nuevo bloque `📈 Acumulación de capital (antes de FIRE)` con tabla anual y tarjetas por percentiles.
+- Persistencia de perfil FIRE en web: carga/descarga JSON local.
+- Panel de control con toggle fijo para ocultar/mostrar.
+- Ajustes de contraste para tarjetas en dark mode móvil.
+- Modo fiscal `Internacional básico` para ahorradores con domicilio fiscal fuera de España (aproximación).
+- Exportación ampliada: CSV + JSON de escenario + botón nativo de impresión/PDF del navegador.
 
 ### 1. **Panel de Control Interactivo (Sidebar)**
 Configura tu perfil en tiempo real:
@@ -62,6 +68,7 @@ Configura tu perfil en tiempo real:
 - 🏛️ Régimen fiscal (España - Fondos/Cartera Directa)
 - 🧭 Modo guiado con explicaciones en lenguaje simple
 - 🎯 Prioridad fiscal: enfoque en acumulación o en jubilación
+- 💾 Carga de perfil JSON desde sidebar (aplicar/limpiar)
 
 Nota: puedes elegir si la simulación parte de cartera líquida (modo base) o capital invertible ampliado
 (cartera líquida + equity de inmuebles invertibles - otras deudas). La vivienda habitual no se incluye en esa base.
@@ -122,7 +129,9 @@ Tu plan se adapta a 4 dimensiones:
 ### 6. **Exportación de Datos**
 
 - 📊 CSV con serie temporal completa (P5, P25, P50, P75, P95, % éxito)
-- 📄 PDF ejecutivo (próximamente)
+- 💾 JSON de perfil FIRE (para reutilizar configuración)
+- 🧩 JSON de escenario (parámetros + resumen)
+- 🖨️ Impresión nativa de la página para guardar en PDF
 
 ### 7. **Privacidad Total**
 
@@ -167,6 +176,7 @@ En despliegues cloud, evita introducir datos sensibles y revisa la política del
 - IRPF ahorro, Patrimonio e ISGF se aplican como drag anual aproximado.
 - No cubre toda la casuística personal/familiar de una liquidación real.
 - En modo "Jubilación", el objetivo FIRE se ajusta con una estimación de impuestos al retirar (aproximación).
+- Para residencia fiscal fuera de España, usa `Internacional básico` (tasas efectivas manuales; no modela normativa país por país).
 
 7. **Paridad CLI/Web**
 - Algunas capacidades del CLI aún no están expuestas en la web con el mismo nivel de detalle.

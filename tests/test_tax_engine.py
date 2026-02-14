@@ -1,5 +1,6 @@
 from src.tax_engine import (
     load_tax_pack,
+    calculate_general_tax_with_details,
     calculate_savings_tax,
     calculate_savings_tax_with_details,
     calculate_wealth_taxes,
@@ -49,3 +50,20 @@ def test_wealth_tax_details_match_scalar():
     assert detail["total_wealth_tax"] == scalar["total_wealth_tax"]
     assert detail["ip_tax"] == scalar["ip_tax"]
     assert detail["isgf_tax_net"] == scalar["isgf_tax"]
+
+
+def test_general_tax_common_system_has_state_and_autonomous_breakdown():
+    pack = load_tax_pack(2026, "es")
+    detail = calculate_general_tax_with_details(50_000.0, pack, "madrid")
+    assert detail["system"] == "common"
+    assert detail["state_breakdown"]["tax"] >= 0.0
+    assert detail["autonomous_breakdown"]["tax"] >= 0.0
+    assert detail["tax"] >= 0.0
+
+
+def test_general_tax_foral_system_uses_foral_breakdown():
+    pack = load_tax_pack(2026, "es")
+    detail = calculate_general_tax_with_details(50_000.0, pack, "navarra")
+    assert detail["system"] == "foral"
+    assert detail["foral_breakdown"]["tax"] >= 0.0
+    assert detail["tax"] >= 0.0

@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional
 import sys
 import re
 import numpy as np
+from datetime import datetime
 
 # Add project root to sys.path to allow imports from src
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,6 +22,12 @@ from src.simulation_models import (
     monte_carlo_bootstrap,
     backtest_rolling_windows,
     load_historical_annual_returns,
+)
+from src.profile_io import serialize_profile, deserialize_profile
+from src.fiscal_modes import (
+    FISCAL_MODE_ES_TAXPACK,
+    FISCAL_MODE_INTL_BASIC,
+    get_effective_fiscal_drag,
 )
 
 
@@ -187,12 +194,13 @@ def get_profile_choice() -> str:
     
     print(f"\n  {len(PROFILES) + 1}) Entrada personalizada (Custom)")
     print(f"  {len(PROFILES) + 2}) Ver ejemplo JSON (para usar con API)")
+    print(f"  {len(PROFILES) + 3}) Cargar perfil JSON")
     print(f"  0) Salir")
 
     while True:
         try:
-            choice = int(input(f"\nElige (0-{len(PROFILES) + 2}): ").strip())
-            if 0 <= choice <= len(PROFILES) + 2:
+            choice = int(input(f"\nElige (0-{len(PROFILES) + 3}): ").strip())
+            if 0 <= choice <= len(PROFILES) + 3:
                 profiles_list = list(PROFILES.keys())
                 if choice == 0:
                     return "exit"
@@ -200,10 +208,12 @@ def get_profile_choice() -> str:
                     return profiles_list[choice - 1]
                 elif choice == len(PROFILES) + 1:
                     return "custom"
-                else:
+                elif choice == len(PROFILES) + 2:
                     return "show_json"
+                else:
+                    return "load_json_profile"
             else:
-                print(f"❌ Por favor, elige un número entre 0 y {len(PROFILES) + 2}.")
+                print(f"❌ Por favor, elige un número entre 0 y {len(PROFILES) + 3}.")
         except ValueError:
             print("❌ Entrada inválida. Introduce un número.")
 
@@ -1403,6 +1413,13 @@ def simulate_monte_carlo(
     """
     target = target_fire(config['annual_spending'], config['safe_withdrawal_rate'])
     years_to_simulate = config.get('years_horizon', 25)
+    fiscal_drag = get_effective_fiscal_drag(
+        regimen_fiscal=config.get("regimen_fiscal", "Otro"),
+        include_optimization=config.get("include_optimización", False),
+        fiscal_mode=config.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK),
+        intl_tax_rates=config.get("intl_tax_rates", {}),
+    )
+    mean_return_effective = config['expected_return'] - fiscal_drag
     base_args = dict(
         initial_wealth=config['current_savings'],
         monthly_contribution=config['annual_contribution'] / 12.0,
@@ -1427,7 +1444,7 @@ def simulate_monte_carlo(
     else:
         sim_raw = monte_carlo_normal(
             **base_args,
-            mean_return=config['expected_return'],
+            mean_return=mean_return_effective,
             volatility=0.15,
             num_simulations=simulations,
             seed=42,
@@ -1449,10 +1466,18 @@ def simulate_monte_carlo(
         'percentile_10': percentile_10,    # Pessimistic scenario
         'percentile_50': percentile_50,    # Median scenario
         'percentile_90': percentile_90,    # Optimistic scenario
+        'percentile_5_path': np.array(sim_raw.get("percentile_5", []), dtype=float),
+        'percentile_25_path': np.array(sim_raw.get("percentile_25", []), dtype=float),
+        'percentile_50_path': np.array(sim_raw.get("percentile_50", []), dtype=float),
+        'percentile_75_path': np.array(sim_raw.get("percentile_75", []), dtype=float),
+        'percentile_95_path': np.array(sim_raw.get("percentile_95", []), dtype=float),
+        'real_percentile_50_path': np.array(sim_raw.get("real_percentile_50", []), dtype=float),
+        'yearly_success_path': np.array(sim_raw.get("yearly_success", []), dtype=float),
         'target': target,
         'mean_final': float(np.mean(final_values)),
         'model_label': model_label,
         'scenarios_count': int(sim_raw.get("n_sims", len(final_values))),
+        'years': int(sim_raw.get("years", years_to_simulate)),
     }
 
 
@@ -1749,6 +1774,26 @@ def show_results(config: Dict[str, Any]):
         print("     Veredicto: 🟡 ACEPTABLE - Probabilidad adecuada (margen estrecho)\n")
     else:
         print("     Veredicto: 🔴 RIESGO - Probabilidad baja (necesitas más capital/contribución)\n")
+
+    # ACCUMULATION TABLE (pre-FIRE)
+    p5_path = mc_results.get("percentile_5_path", np.array([]))
+    p25_path = mc_results.get("percentile_25_path", np.array([]))
+    p50_path = mc_results.get("percentile_50_path", np.array([]))
+    p75_path = mc_results.get("percentile_75_path", np.array([]))
+    p95_path = mc_results.get("percentile_95_path", np.array([]))
+    if len(p50_path) > 1:
+        print("╔════════════════════════════════════════════════════════════════════════════╗")
+        print("║                 📈 ACUMULACIÓN DE CAPITAL (ANTES DE FIRE)                 ║")
+        print("╚════════════════════════════════════════════════════════════════════════════╝")
+        print("  ┌──────┬──────┬──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐")
+        print("  │ Año  │ Edad │      P5 (€)  │     P25 (€)  │     P50 (€)  │     P75 (€)  │     P95 (€)  │")
+        print("  ├──────┼──────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤")
+        for y in range(min(len(p50_path), config.get("years_horizon", 25) + 1)):
+            age = config.get("age", 30) + y
+            print(
+                f"  │ {y:>4} │ {age:>4} │ {p5_path[y]:>12,.0f} │ {p25_path[y]:>12,.0f} │ {p50_path[y]:>12,.0f} │ {p75_path[y]:>12,.0f} │ {p95_path[y]:>12,.0f} │"
+            )
+        print("  └──────┴──────┴──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘\n")
     
     if years_to_fire is not None:
         print("╔════════════════════════════════════════════════════════════════════════════╗")
@@ -1949,6 +1994,9 @@ def show_results(config: Dict[str, Any]):
     print(f"     • LEAN, NORMAL, FAT: Usan la misma aportación total (€{annual_contrib_total:,.0f}/año)")
     print(f"     • BARISTA: Reducen aportación laboral a €{annual_contrib * 0.5:,.0f} + mantienen alquileres")
     print(f"     • Todos asumen SWR del {swr*100:.1f}% para calcular el objetivo de cartera\n")
+    export_now = input("¿Deseas exportar este escenario a JSON+CSV? (s/n) [defecto: s]: ").strip().lower()
+    if export_now in ("", "s", "si", "sí"):
+        export_results_artifacts(config, mc_results)
 
 
 def show_json_example():
@@ -1973,6 +2021,99 @@ def show_json_example():
     
     print(json.dumps(example, indent=2))
     print("\nGuarda esto en un archivo JSON y úsalo con src/calculator.py")
+
+
+def configure_cli_fiscal_mode(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Configure fiscal mode for CLI parity with web."""
+    print_section("Fiscalidad (modo)")
+    print("  1) España (Tax Pack aproximado)")
+    print("  2) Internacional básico (tasas efectivas manuales)")
+    choice = input("Elige modo fiscal [1]: ").strip() or "1"
+
+    if choice == "2":
+        config["fiscal_mode"] = FISCAL_MODE_INTL_BASIC
+        gains = get_percent_input("Impuesto efectivo plusvalías (%)", default=0.10, max_percent=60)
+        dividends = get_percent_input("Impuesto efectivo dividendos (%)", default=0.15, max_percent=60)
+        interest = get_percent_input("Impuesto efectivo intereses (%)", default=0.20, max_percent=60)
+        wealth = get_percent_input("Impuesto anual efectivo patrimonio (%)", default=0.00, max_percent=5)
+        config["intl_tax_rates"] = {
+            "gains": gains,
+            "dividends": dividends,
+            "interest": interest,
+            "wealth": wealth,
+        }
+    else:
+        config["fiscal_mode"] = FISCAL_MODE_ES_TAXPACK
+        config["intl_tax_rates"] = {
+            "gains": config.get("tax_rate_on_gains", 0.15),
+            "dividends": config.get("tax_rate_on_dividends", 0.30),
+            "interest": config.get("tax_rate_on_interest", 0.45),
+            "wealth": 0.0,
+        }
+    return config
+
+
+def load_profile_from_json_file(file_path: str) -> Dict[str, Any]:
+    """Load and sanitize profile config from local JSON file."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    safe_config, warnings_list = deserialize_profile(payload)
+    if warnings_list:
+        print("\n⚠️  Avisos al cargar perfil:")
+        for w in warnings_list:
+            print(f"   - {w}")
+    return safe_config
+
+
+def save_profile_to_json_file(config: Dict[str, Any], file_path: str) -> None:
+    """Save current profile config to local JSON file."""
+    payload = serialize_profile(config)
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def export_results_artifacts(config: Dict[str, Any], mc_results: Dict[str, Any]) -> None:
+    """Export scenario artifacts to JSON and CSV files."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_path = f"fire_cli_scenario_{timestamp}.json"
+    csv_path = f"fire_cli_series_{timestamp}.csv"
+
+    scenario_payload = {
+        "meta": {
+            "generated_at": datetime.now().isoformat(),
+            "model": mc_results.get("model_label", "Monte Carlo (Normal)"),
+            "fiscal_mode": config.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK),
+        },
+        "profile": serialize_profile(config),
+        "summary": {
+            "success_rate": float(mc_results.get("success_rate", 0.0)),
+            "target": float(mc_results.get("target", 0.0)),
+            "percentile_50_final": float(mc_results.get("percentile_50", 0.0)),
+        },
+    }
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(scenario_payload, f, ensure_ascii=False, indent=2)
+
+    years = list(range(int(mc_results.get("years", len(mc_results.get("percentile_50_path", [])) - 1)) + 1))
+    p5 = mc_results.get("percentile_5_path", np.array([]))
+    p25 = mc_results.get("percentile_25_path", np.array([]))
+    p50 = mc_results.get("percentile_50_path", np.array([]))
+    p75 = mc_results.get("percentile_75_path", np.array([]))
+    p95 = mc_results.get("percentile_95_path", np.array([]))
+    ysucc = mc_results.get("yearly_success_path", np.array([]))
+
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write("Año,P5,P25,P50,P75,P95,SuccessRate\n")
+        for i, y in enumerate(years):
+            if i < len(p50):
+                f.write(
+                    f"{y},{float(p5[i]):.2f},{float(p25[i]):.2f},{float(p50[i]):.2f},"
+                    f"{float(p75[i]):.2f},{float(p95[i]):.2f},{float(ysucc[i]) if i < len(ysucc) else 0.0:.2f}\n"
+                )
+
+    print(f"\n📦 Export generado:")
+    print(f"   • JSON escenario: {json_path}")
+    print(f"   • CSV serie:      {csv_path}")
 
 
 # ============================================================================
@@ -2001,6 +2142,18 @@ def main():
             print(WELCOME_MESSAGE)
             print(STARTUP_LIMITATIONS_MESSAGE)
             continue
+        elif choice == "load_json_profile":
+            json_path = input("\nRuta del perfil JSON a cargar: ").strip()
+            try:
+                config = load_profile_from_json_file(json_path)
+                print("✅ Perfil cargado desde JSON.")
+            except Exception as e:
+                print(f"❌ No se pudo cargar el perfil: {e}")
+                input("\nPresiona ENTER para continuar...")
+                clear_screen()
+                print(WELCOME_MESSAGE)
+                print(STARTUP_LIMITATIONS_MESSAGE)
+                continue
         elif choice == "custom":
             config = input_custom_profile()
         else:
@@ -2148,8 +2301,26 @@ def main():
             )
         
         # Collect real estate and liability information
-        config = collect_real_estate_and_liabilities(config)
-        
+        if "primary_residence_value" not in config:
+            config = collect_real_estate_and_liabilities(config)
+        else:
+            # Normalize names for compatibility when profile JSON uses web keys
+            if "vivienda_habitual_valor" in config and "primary_residence_value" not in config:
+                config["primary_residence_value"] = config.get("vivienda_habitual_valor", 0)
+            if "vivienda_habitual_hipoteca" in config and "primary_residence_mortgage" not in config:
+                config["primary_residence_mortgage"] = config.get("vivienda_habitual_hipoteca", 0)
+            if "inmuebles_invertibles_valor" in config and "other_real_estate_value" not in config:
+                config["other_real_estate_value"] = config.get("inmuebles_invertibles_valor", 0)
+            if "inmuebles_invertibles_hipoteca" in config and "other_real_estate_mortgage" not in config:
+                config["other_real_estate_mortgage"] = config.get("inmuebles_invertibles_hipoteca", 0)
+            config["annual_rental_income"] = float(
+                config.get("annual_rental_income", 0.0)
+                or config.get("renta_bruta_alquiler_anual", 0.0)
+            )
+
+        # Fiscal mode (ES / International basic)
+        config = configure_cli_fiscal_mode(config)
+
         # Set other defaults
         if 'include_scenarios' not in config:
             config['include_scenarios'] = True
@@ -2159,6 +2330,19 @@ def main():
             config['social_security_contributions'] = 0.0
         if 'portfolio_info' not in config:
             config['portfolio_info'] = {"method": "generic"}
+        if 'regimen_fiscal' not in config:
+            config['regimen_fiscal'] = "Otro"
+        if 'include_optimización' not in config:
+            config['include_optimización'] = False
+
+        save_profile = input("¿Guardar este perfil como JSON antes de simular? (s/n) [defecto: n]: ").strip().lower()
+        if save_profile in ("s", "si", "sí"):
+            out_path = input("Ruta de salida [fire_cli_profile.json]: ").strip() or "fire_cli_profile.json"
+            try:
+                save_profile_to_json_file(config, out_path)
+                print(f"✅ Perfil guardado en {out_path}")
+            except Exception as e:
+                print(f"⚠️ No se pudo guardar el perfil: {e}")
         
         # Show summary and get confirmation
         if show_summary(config):

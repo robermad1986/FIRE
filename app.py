@@ -19,6 +19,7 @@ Architecture:
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -26,6 +27,8 @@ from typing import Dict, Tuple, List, Optional, Any
 import inspect
 from datetime import datetime
 import warnings
+import json
+import re
 
 # Black-box import from domain layer
 from src.calculator import (
@@ -46,6 +49,20 @@ from src.simulation_models import (
     monte_carlo_bootstrap,
     backtest_rolling_windows,
     load_historical_annual_returns,
+    load_historical_annual_series,
+)
+from src.real_estate_model import compute_effective_housing_and_rental_flows
+from src.retirement_models import (
+    calculate_effective_public_pension_annual,
+    estimate_retirement_tax_context as estimate_retirement_tax_context_core,
+    estimate_auto_taxable_withdrawal_ratio as estimate_auto_taxable_withdrawal_ratio_core,
+    build_decumulation_table_two_stage_schedule as build_decumulation_table_two_stage_schedule_core,
+)
+from src.profile_io import serialize_profile, deserialize_profile
+from src.fiscal_modes import (
+    FISCAL_MODE_ES_TAXPACK,
+    FISCAL_MODE_INTL_BASIC,
+    get_effective_fiscal_drag,
 )
 
 warnings.filterwarnings("ignore")
@@ -106,6 +123,90 @@ st.markdown("""
     label {
         font-weight: 600;
         color: #2c3e50;
+    }
+
+    @media (prefers-color-scheme: dark) {
+        .stMetric {
+            background-color: #1f2430 !important;
+            border-left-color: #4da3ff !important;
+            color: #e6edf3 !important;
+        }
+        [data-testid="stMetricLabel"], [data-testid="stMetricValue"], [data-testid="stMetricDelta"] {
+            color: #e6edf3 !important;
+        }
+    }
+
+    @media (max-width: 768px) {
+        .stMetric {
+            padding: 10px !important;
+            border-left-width: 3px !important;
+            border-radius: 10px !important;
+        }
+        [data-testid="stMetricDelta"] {
+            font-size: 0.9rem !important;
+            line-height: 1.2rem !important;
+        }
+    }
+
+    .ab-compare-shell {
+        border: 1px solid rgba(31, 119, 180, 0.25);
+        border-radius: 12px;
+        padding: 14px;
+        margin-top: 6px;
+        background: rgba(31, 119, 180, 0.03);
+    }
+    .ab-compare-title {
+        font-weight: 700;
+        margin-bottom: 8px;
+    }
+    .ab-compare-caption {
+        color: #556070;
+        font-size: 0.9rem;
+        margin-bottom: 10px;
+    }
+    .ab-compare-insight {
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-top: 8px;
+        background: rgba(46, 204, 113, 0.12);
+        border: 1px solid rgba(46, 204, 113, 0.35);
+    }
+    .ab-compare-insight.warn {
+        background: rgba(243, 156, 18, 0.12);
+        border: 1px solid rgba(243, 156, 18, 0.35);
+    }
+    .ab-compare-insight.danger {
+        background: rgba(231, 76, 60, 0.12);
+        border: 1px solid rgba(231, 76, 60, 0.35);
+    }
+
+    @media (prefers-color-scheme: dark) {
+        .ab-compare-shell {
+            background: rgba(77, 163, 255, 0.09);
+            border-color: rgba(77, 163, 255, 0.38);
+        }
+        .ab-compare-caption {
+            color: #c1ccd7;
+        }
+        .ab-compare-insight {
+            color: #dbe6ee;
+            background: rgba(46, 204, 113, 0.18);
+            border-color: rgba(46, 204, 113, 0.45);
+        }
+        .ab-compare-insight.warn {
+            background: rgba(243, 156, 18, 0.18);
+            border-color: rgba(243, 156, 18, 0.45);
+        }
+        .ab-compare-insight.danger {
+            background: rgba(231, 76, 60, 0.18);
+            border-color: rgba(231, 76, 60, 0.45);
+        }
+    }
+
+    @media (max-width: 768px) {
+        .ab-compare-shell {
+            padding: 10px;
+        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -420,19 +521,28 @@ def render_active_context_summary(params: Dict) -> None:
         if fiscal_focus == "jubilación"
         else "La simulación prioriza la fiscalidad durante los años previos a FIRE."
     )
-    renta_efectiva = params.get("renta_bruta_alquiler_anual_efectiva", 0.0)
+    renta_efectiva = params.get("renta_neta_alquiler_anual_efectiva", 0.0)
+    renta_bruta_base = params.get("renta_bruta_alquiler_anual_efectiva", 0.0)
+    cuota_hipotecas_mensual = params.get("cuota_total_hipotecas_mensual_efectiva", 0.0)
     ahorro_vivienda_efectivo = params.get("ahorro_vivienda_habitual_anual_efectivo", 0.0)
     renta_sentence = ""
     if renta_efectiva > 0:
-        renta_sentence = (
-            f" También se está considerando una renta bruta por alquiler de **€{renta_efectiva:,.0f}/año** "
-            "como apoyo al plan (aproximación sin modelado fiscal inmobiliario detallado)."
-        )
+        renta_sentence = f" También se está considerando una renta por alquiler de **€{renta_efectiva:,.0f}/año**."
+        if abs(renta_bruta_base - renta_efectiva) > 1:
+            renta_sentence += (
+                f" (Bruta declarada: €{renta_bruta_base:,.0f}/año; ajustada por vacancia/gastos/fiscalidad simple)."
+            )
     vivienda_sentence = ""
     if ahorro_vivienda_efectivo > 0:
         vivienda_sentence = (
             f" Además, se descuenta un ahorro anual por vivienda habitual de **€{ahorro_vivienda_efectivo:,.0f}** "
             "al calcular el gasto que debe cubrir la cartera."
+        )
+    hipoteca_sentence = ""
+    if cuota_hipotecas_mensual > 0:
+        hipoteca_sentence = (
+            f" Las cuotas hipotecarias activas restan **€{cuota_hipotecas_mensual:,.0f}/mes** "
+            "a la capacidad de ahorro durante la fase de acumulación."
         )
 
     st.markdown(
@@ -441,7 +551,7 @@ def render_active_context_summary(params: Dict) -> None:
         f"(base usada: **€{params.get('patrimonio_base_simulacion', params['patrimonio_inicial']):,.0f}**, "
         f"{base_explanation}; la vivienda habitual se mantiene fuera de esta base). "
         f"Además, el enfoque fiscal está orientado a **{fiscal_focus}**: "
-        f"{fiscal_sentence}{renta_sentence}{vivienda_sentence}"
+        f"{fiscal_sentence}{renta_sentence}{vivienda_sentence}{hipoteca_sentence}"
     )
 
 
@@ -457,17 +567,34 @@ def render_simple_result_summary(simulation_results: Dict, params: Dict) -> None
     else:
         timeline_text = f"El escenario central llega a FIRE en aproximadamente {years_to_fire} años."
     renta_line = ""
-    renta_efectiva = params.get("renta_bruta_alquiler_anual_efectiva", 0.0)
+    renta_efectiva = params.get("renta_neta_alquiler_anual_efectiva", 0.0)
+    renta_bruta_base = params.get("renta_bruta_alquiler_anual_efectiva", 0.0)
+    cuota_hipotecas_mensual = params.get("cuota_total_hipotecas_mensual_efectiva", 0.0)
+    cuota_post_fire_mensual = params.get("cuota_post_fire_hipotecas_mensual_efectiva", 0.0)
     if renta_efectiva > 0:
         renta_line = (
-            f"- Renta bruta por alquiler considerada: **€{renta_efectiva:,.0f}/año** "
-            "(aproximación sin fiscalidad inmobiliaria detallada).\n"
+            f"- Renta por alquiler considerada en cálculo: **€{renta_efectiva:,.0f}/año**.\n"
         )
+        if abs(renta_bruta_base - renta_efectiva) > 1:
+            renta_line += (
+                f"- Renta bruta declarada: **€{renta_bruta_base:,.0f}/año** "
+                "(ajustada por vacancia/gastos/fiscalidad simple).\n"
+            )
     vivienda_line = ""
     ahorro_vivienda_efectivo = params.get("ahorro_vivienda_habitual_anual_efectivo", 0.0)
     if ahorro_vivienda_efectivo > 0:
         vivienda_line = (
             f"- Ahorro anual por vivienda habitual considerado: **€{ahorro_vivienda_efectivo:,.0f}/año**.\n"
+        )
+    hipoteca_line = ""
+    if cuota_hipotecas_mensual > 0:
+        hipoteca_line += (
+            f"- Cuotas hipotecarias pre-FIRE descontadas del ahorro: **€{cuota_hipotecas_mensual:,.0f}/mes**.\n"
+        )
+    if cuota_post_fire_mensual > 0:
+        hipoteca_line += (
+            f"- Cuotas hipotecarias que seguirían vivas en FIRE: **€{cuota_post_fire_mensual:,.0f}/mes** "
+            "(sumadas al gasto de cartera).\n"
         )
 
     st.info(
@@ -475,12 +602,237 @@ def render_simple_result_summary(simulation_results: Dict, params: Dict) -> None
         f"- Capital inicial usado en simulación: **€{params.get('patrimonio_base_simulacion', params['patrimonio_inicial']):,.0f}**.\n"
         f"{renta_line}"
         f"{vivienda_line}"
+        f"{hipoteca_line}"
         f"- Tu objetivo de cartera es **€{fire_target:,.0f}**.\n"
         f"- {timeline_text}\n"
         f"- Probabilidad estimada de éxito: **{success_rate:.0f}%**.\n\n"
         "Si esto no encaja con tu objetivo, normalmente las palancas más efectivas son: "
         "subir ahorro mensual, bajar gasto objetivo o ampliar horizonte."
     )
+
+
+def render_final_narrative_summary(simulation_results: Dict, params: Dict) -> None:
+    """Render long-form final narrative with actionable guidance."""
+    years_horizon = params["edad_objetivo"] - params["edad_actual"]
+    fire_target = get_display_fire_target(simulation_results, params)
+    years_to_fire = find_years_to_fire(simulation_results["real_percentile_50"], fire_target)
+    success_rate = float(simulation_results.get("success_rate_final", 0.0))
+    final_real = float(simulation_results["real_percentile_50"][-1])
+    gap = final_real - fire_target
+    savings_monthly = float(params.get("aportacion_mensual_efectiva", params.get("aportacion_mensual", 0.0)))
+    fiscal_mode = params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK)
+
+    if years_to_fire is None:
+        stage = "bajo"
+        state_line = (
+            f"Con los parámetros actuales, el escenario central no alcanza FIRE en el horizonte de {years_horizon} años. "
+            f"La probabilidad estimada de éxito es {success_rate:.0f}% y la brecha final esperada ronda €{abs(gap):,.0f} en euros de hoy."
+        )
+    elif success_rate >= 90:
+        stage = "alto"
+        state_line = (
+            f"Tu plan se ve sólido: el escenario central llega a FIRE en {years_to_fire} años "
+            f"y la probabilidad de éxito se sitúa en {success_rate:.0f}%."
+        )
+    else:
+        stage = "intermedio"
+        state_line = (
+            f"Tu plan es alcanzable en el escenario central ({years_to_fire} años), "
+            f"pero con sensibilidad relevante: probabilidad de éxito {success_rate:.0f}%."
+        )
+
+    explain_line = (
+        f"El resultado se explica por tres palancas principales: gasto objetivo (€{params['gastos_anuales']:,.0f}/año), "
+        f"ahorro efectivo (≈€{savings_monthly:,.0f}/mes) y rentabilidad real esperada "
+        f"({(((1 + params['rentabilidad_esperada']) / (1 + params['inflacion'])) - 1)*100:.2f}% anual). "
+        f"Además, el cálculo fiscal activo es {'español con Tax Pack' if fiscal_mode == FISCAL_MODE_ES_TAXPACK else 'internacional básico (tasas efectivas)'}."
+    )
+
+    risk_line = (
+        "El principal riesgo está en la combinación de inflación alta y rentabilidad baja durante varios años seguidos. "
+        "Si ese escenario se materializa, el tiempo a FIRE puede desplazarse de forma significativa."
+    )
+
+    if stage == "alto":
+        plan_line = (
+            "Plan recomendado: en los próximos 90 días, define un rebalanceo automático y política de retirada; "
+            "en 12 meses, valida que tu gasto real sigue alineado con el objetivo; y después revisa trimestralmente "
+            "la matriz de sensibilidad y ajusta solo si cambian ingresos, gasto o horizonte."
+        )
+    elif stage == "intermedio":
+        plan_line = (
+            "Plan recomendado: en 90 días, identifica 1-2 mejoras de ahorro recurrente y valida costes fiscales; "
+            "en 12 meses, incrementa aportación o reduce gasto objetivo para ganar margen; "
+            "y a partir de ahí revisa trimestralmente la probabilidad de éxito con disciplina."
+        )
+    else:
+        plan_line = (
+            "Plan recomendado: en 90 días, prioriza aumentar ahorro y recortar gasto objetivo con impacto alto; "
+            "en 12 meses, recalibra horizonte o estrategia de ingresos complementarios; "
+            "y mantén revisión trimestral para comprobar progreso contra una meta intermedia anual."
+        )
+
+    st.markdown("### 🧱 Resumen final de tu plan FIRE")
+    st.write(state_line)
+    st.write(explain_line)
+    st.write(risk_line)
+    st.write(plan_line)
+    st.markdown(
+        "1. Descarga tu proyección (`CSV/JSON`) para seguimiento anual.\n"
+        "2. Revisa sensibilidad e hipótesis fiscales al menos una vez por trimestre.\n"
+        "3. Ajusta aportación, gasto objetivo u horizonte solo con cambios reales de contexto."
+    )
+
+
+def build_ab_summary(simulation_results: Dict, params: Dict) -> Dict[str, Any]:
+    """Build a compact, comparable snapshot for A/B comparison."""
+    fire_target = float(get_display_fire_target(simulation_results, params))
+    years_horizon = int(params["edad_objetivo"] - params["edad_actual"])
+    years_to_fire = find_years_to_fire(simulation_results["real_percentile_50"], fire_target)
+    return {
+        "model": "Monte Carlo (Normal)",
+        "years_horizon": years_horizon,
+        "years_to_fire": years_to_fire,
+        "success_rate_final": float(simulation_results.get("success_rate_final", 0.0)),
+        "final_real_p50": float(simulation_results["real_percentile_50"][-1]),
+        "final_nominal_p50": float(simulation_results["percentile_50"][-1]),
+        "fire_target": fire_target,
+    }
+
+
+def render_ab_comparator(current_results: Dict, params: Dict) -> None:
+    """Render A/B comparator: baseline scenario A vs current scenario B."""
+    st.markdown("### 🆚 Comparador A/B (escenario guardado vs actual)")
+    st.markdown(
+        "<div class='ab-compare-shell'>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div class='ab-compare-title'>Compara rápidamente tu escenario actual (B) contra una línea base guardada (A).</div>",
+        unsafe_allow_html=True,
+    )
+
+    controls_col1, controls_col2 = st.columns(2)
+    with controls_col1:
+        if st.button("Guardar escenario actual como A", key="ab_save_baseline", width="stretch"):
+            st.session_state["ab_baseline_params"] = serialize_profile(params)
+            st.session_state["ab_baseline_summary"] = build_ab_summary(current_results, params)
+            st.session_state["ab_baseline_created_at"] = datetime.now().isoformat(timespec="seconds")
+            st.session_state["ab_baseline_model"] = "Monte Carlo (Normal)"
+            st.success("Escenario A guardado para comparación.")
+    with controls_col2:
+        if st.button("Limpiar comparación", key="ab_clear_baseline", width="stretch"):
+            st.session_state.pop("ab_baseline_params", None)
+            st.session_state.pop("ab_baseline_summary", None)
+            st.session_state.pop("ab_baseline_created_at", None)
+            st.session_state.pop("ab_baseline_model", None)
+            st.info("Comparación A/B eliminada.")
+
+    baseline_summary = st.session_state.get("ab_baseline_summary")
+    if not baseline_summary:
+        st.info("Aún no hay escenario A. Guarda uno para activar la comparación.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    current_summary = build_ab_summary(current_results, params)
+    created_at = st.session_state.get("ab_baseline_created_at", "n/d")
+    st.markdown(
+        f"<div class='ab-compare-caption'>A guardado: {created_at} | Modelo fijo: Monte Carlo (Normal)</div>",
+        unsafe_allow_html=True,
+    )
+
+    baseline_years = baseline_summary.get("years_to_fire")
+    current_years = current_summary.get("years_to_fire")
+    baseline_horizon = int(baseline_summary.get("years_horizon", current_summary["years_horizon"]))
+    current_horizon = int(current_summary["years_horizon"])
+
+    def _format_years(value: Optional[int], horizon: int) -> str:
+        return f"{value} años" if value is not None else f"No alcanzable (> {horizon} años)"
+
+    if baseline_years is not None and current_years is not None:
+        delta_years = current_years - baseline_years
+        years_delta_text = f"{delta_years:+d} años vs A"
+        years_delta_color = "inverse"
+    elif baseline_years is None and current_years is not None:
+        years_delta_text = "Ahora sí alcanzable"
+        years_delta_color = "normal"
+    elif baseline_years is not None and current_years is None:
+        years_delta_text = "Ahora no alcanzable"
+        years_delta_color = "off"
+    else:
+        years_delta_text = "Sin cambio (no alcanzable)"
+        years_delta_color = "off"
+
+    success_delta = float(current_summary["success_rate_final"]) - float(baseline_summary.get("success_rate_final", 0.0))
+    real_delta = float(current_summary["final_real_p50"]) - float(baseline_summary.get("final_real_p50", 0.0))
+    target_delta = float(current_summary["fire_target"]) - float(baseline_summary.get("fire_target", 0.0))
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric(
+            "⏱️ Años hasta FIRE (B)",
+            _format_years(current_years, current_horizon),
+            delta=years_delta_text,
+            delta_color=years_delta_color,
+        )
+    with m2:
+        st.metric(
+            "📈 Éxito final (B)",
+            f"{current_summary['success_rate_final']:.0f}%",
+            delta=f"{success_delta:+.1f} pp vs A",
+            delta_color="normal",
+        )
+    with m3:
+        st.metric(
+            "💰 P50 poder adquisitivo (B)",
+            f"€{current_summary['final_real_p50']:,.0f}",
+            delta=f"{real_delta:+,.0f} € vs A",
+            delta_color="normal",
+        )
+    with m4:
+        st.metric(
+            "🎯 Objetivo FIRE (B, € hoy)",
+            f"€{current_summary['fire_target']:,.0f}",
+            delta=f"{target_delta:+,.0f} € vs A",
+            delta_color="inverse",
+        )
+
+    score = 0
+    if baseline_years is None and current_years is not None:
+        score += 2
+    elif baseline_years is not None and current_years is None:
+        score -= 2
+    elif baseline_years is not None and current_years is not None:
+        if current_years < baseline_years:
+            score += 1
+        elif current_years > baseline_years:
+            score -= 1
+
+    if success_delta >= 2.0:
+        score += 1
+    elif success_delta <= -2.0:
+        score -= 1
+
+    if real_delta >= 10_000:
+        score += 1
+    elif real_delta <= -10_000:
+        score -= 1
+
+    if score >= 2:
+        insight_cls = ""
+        insight_text = "Lectura rápida: B mejora de forma clara frente a A en robustez y/o velocidad hacia FIRE."
+    elif score <= -2:
+        insight_cls = "danger"
+        insight_text = "Lectura rápida: B empeora frente a A. Revisa sobre todo ahorro, gasto objetivo y horizonte."
+    else:
+        insight_cls = "warn"
+        insight_text = "Lectura rápida: resultado mixto entre A y B. Hay cambios, pero no una mejora neta contundente."
+
+    st.markdown(
+        f"<div class='ab-compare-insight {insight_cls}'>{insight_text}</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def estimate_retirement_tax_context(
@@ -490,24 +842,32 @@ def estimate_retirement_tax_context(
     tax_pack: Optional[Dict],
     region: Optional[str],
 ) -> Dict[str, float]:
-    """Estimate post-retirement annual taxes and gross FIRE target.
+    """Compatibility wrapper around core retirement tax model."""
+    return estimate_retirement_tax_context_core(
+        net_spending=net_spending,
+        safe_withdrawal_rate=safe_withdrawal_rate,
+        taxable_withdrawal_ratio=taxable_withdrawal_ratio,
+        tax_pack=tax_pack,
+        region=region,
+    )
 
-    The user defines desired net annual spending. We approximate required gross
-    withdrawal by adding savings tax on the taxable part of withdrawals and
-    annual wealth taxes (IP/ISGF) when applicable.
-    """
+
+def estimate_retirement_tax_context_intl_basic(
+    net_spending: float,
+    safe_withdrawal_rate: float,
+    taxable_withdrawal_ratio: float,
+    intl_tax_rates: Dict[str, float],
+) -> Dict[str, float]:
+    """Approximate retirement-tax context for non-Spain basic mode."""
     base_target = net_spending / safe_withdrawal_rate
-    if not tax_pack or not region:
-        return {
-            "base_target": base_target,
-            "gross_withdrawal_required": net_spending,
-            "annual_savings_tax_retirement": 0.0,
-            "annual_wealth_tax_retirement": 0.0,
-            "total_annual_tax_retirement": 0.0,
-            "target_portfolio_gross": base_target,
-        }
-
     ratio = min(1.0, max(0.0, taxable_withdrawal_ratio))
+    savings_rate = (
+        max(0.0, min(1.0, float(intl_tax_rates.get("gains", 0.10)))) * 0.55
+        + max(0.0, min(1.0, float(intl_tax_rates.get("dividends", 0.15)))) * 0.25
+        + max(0.0, min(1.0, float(intl_tax_rates.get("interest", 0.20)))) * 0.20
+    )
+    wealth_rate = max(0.0, min(1.0, float(intl_tax_rates.get("wealth", 0.0))))
+
     portfolio_target = base_target
     annual_savings_tax = 0.0
     annual_wealth_tax = 0.0
@@ -515,33 +875,27 @@ def estimate_retirement_tax_context(
     converged = False
     iterations = 0
 
-    # Fixed-point solve with convergence check to avoid drift/artifacts.
     for outer_idx in range(1, 31):
         iterations = outer_idx
-        wealth_detail = calculate_wealth_taxes_with_details(portfolio_target, tax_pack, region)
-        annual_wealth_tax = wealth_detail["total_wealth_tax"]
-
-        gross_withdrawal_candidate = net_spending + annual_wealth_tax
+        annual_wealth_tax = portfolio_target * wealth_rate
+        gross_candidate = net_spending + annual_wealth_tax
         for _ in range(30):
-            taxable_base = max(0.0, gross_withdrawal_candidate * ratio)
-            savings_detail = calculate_savings_tax_with_details(taxable_base, tax_pack, region)
-            annual_savings_tax_new = savings_detail["tax"]
-            updated_gross = net_spending + annual_wealth_tax + annual_savings_tax_new
-            if abs(updated_gross - gross_withdrawal_candidate) <= 0.01:
+            annual_savings_tax_new = max(0.0, gross_candidate * ratio) * savings_rate
+            updated = net_spending + annual_wealth_tax + annual_savings_tax_new
+            if abs(updated - gross_candidate) <= 0.01:
                 annual_savings_tax = annual_savings_tax_new
-                gross_withdrawal_candidate = updated_gross
+                gross_candidate = updated
                 break
             annual_savings_tax = annual_savings_tax_new
-            gross_withdrawal_candidate = updated_gross
-
-        new_target = gross_withdrawal_candidate / safe_withdrawal_rate
+            gross_candidate = updated
+        new_target = gross_candidate / safe_withdrawal_rate
         if abs(new_target - portfolio_target) <= 1.0:
             portfolio_target = new_target
-            gross_withdrawal = gross_withdrawal_candidate
+            gross_withdrawal = gross_candidate
             converged = True
             break
         portfolio_target = new_target
-        gross_withdrawal = gross_withdrawal_candidate
+        gross_withdrawal = gross_candidate
 
     return {
         "base_target": base_target,
@@ -562,30 +916,14 @@ def estimate_auto_taxable_withdrawal_ratio(
     expected_return: float,
     contribution_growth_rate: float = 0.0,
 ) -> float:
-    """Estimate taxable portion of withdrawals at retirement.
-
-    Approximation:
-    - Principal (cost basis) = initial wealth + cumulative contributions.
-    - Gains = projected portfolio - principal.
-    - Taxable ratio at withdrawal ~= gains / portfolio.
-    """
-    portfolio = max(0.0, float(initial_wealth))
-    principal = max(0.0, float(initial_wealth))
-    annual_contribution = max(0.0, float(monthly_contribution) * 12.0)
-    r = max(-0.99, float(expected_return))
-    g = max(-0.99, float(contribution_growth_rate))
-
-    for year in range(1, max(0, int(years)) + 1):
-        portfolio = portfolio * (1 + r)
-        contribution_year = annual_contribution * ((1 + g) ** (year - 1))
-        portfolio += contribution_year
-        principal += contribution_year
-
-    if portfolio <= 0:
-        return 0.0
-
-    gains = max(0.0, portfolio - principal)
-    return min(1.0, gains / portfolio)
+    """Compatibility wrapper around core taxable-withdrawal estimator."""
+    return estimate_auto_taxable_withdrawal_ratio_core(
+        initial_wealth=initial_wealth,
+        monthly_contribution=monthly_contribution,
+        years=years,
+        expected_return=expected_return,
+        contribution_growth_rate=contribution_growth_rate,
+    )
 
 
 def get_display_fire_target(simulation_results: Dict, params: Dict) -> float:
@@ -631,9 +969,9 @@ def render_retirement_tax_focus_summary(params: Dict) -> None:
         "Referencia de fórmula: objetivo base = gasto neto / SWR. Al subir SWR, ese objetivo base baja; "
         "el ajuste fiscal puede suavizar esa caída, pero no invertirla en condiciones normales."
     )
-    if params.get("renta_bruta_alquiler_anual_efectiva", 0) > 0:
+    if params.get("renta_neta_alquiler_anual_efectiva", 0) > 0:
         st.caption(
-            f"Ingreso bruto alquiler considerado: €{params['renta_bruta_alquiler_anual_efectiva']:,.0f}/año."
+            f"Ingreso alquiler considerado: €{params['renta_neta_alquiler_anual_efectiva']:,.0f}/año."
         )
     if params.get("ahorro_vivienda_habitual_anual_efectivo", 0) > 0:
         st.caption(
@@ -742,58 +1080,23 @@ def build_decumulation_table_two_stage_schedule(
     inflation_rate: float,
     tax_rate_on_gains: float,
 ) -> pd.DataFrame:
-    """Two-stage decumulation with explicit public/private pension schedule."""
-    rows: List[Dict[str, float]] = []
-    portfolio = float(max(0.0, starting_portfolio))
-    inflation_factor = 1.0
-    plan_private_end_age = plan_private_start_age + max(0, plan_private_duration_years) - 1
-
-    for year in range(1, years_in_retirement + 1):
-        age = fire_age + year - 1
-        tramo = "Pre-pensión" if age < pension_public_start_age else "Post-pensión"
-
-        income_public = pension_public_net_annual if age >= pension_public_start_age else 0.0
-        income_private = (
-            plan_private_net_annual
-            if plan_private_duration_years > 0 and plan_private_start_age <= age <= plan_private_end_age
-            else 0.0
-        )
-        income_other = other_income_post_pension_annual if age >= pension_public_start_age else 0.0
-        extra_cost = pre_pension_extra_cost_annual if age < pension_public_start_age else 0.0
-
-        annual_need_from_portfolio = max(
-            0.0,
-            annual_spending_base + extra_cost - income_public - income_private - income_other,
-        )
-
-        capital_inicial = portfolio
-        retirada = annual_need_from_portfolio * inflation_factor
-        growth_gross = capital_inicial * expected_return
-        tax_growth = max(0.0, growth_gross) * max(0.0, tax_rate_on_gains)
-        growth_net = growth_gross - tax_growth
-        capital_final = max(0.0, capital_inicial + growth_net - retirada)
-
-        rows.append(
-            {
-                "Año jubilación": year,
-                "Edad": age,
-                "Tramo": tramo,
-                "Ingreso pensión pública (€)": income_public * inflation_factor,
-                "Ingreso plan privado (€)": income_private * inflation_factor,
-                "Otras rentas (€)": income_other * inflation_factor,
-                "Coste extra pre-pensión (€)": extra_cost * inflation_factor,
-                "Capital inicial (€)": capital_inicial,
-                "Retirada anual (€)": retirada,
-                "Crecimiento neto (€)": growth_net,
-                "Capital final (€)": capital_final,
-                "Capital agotado": capital_final <= 0,
-            }
-        )
-
-        portfolio = capital_final
-        inflation_factor *= (1 + inflation_rate)
-
-    return pd.DataFrame(rows)
+    """Compatibility wrapper around core two-stage schedule model."""
+    return build_decumulation_table_two_stage_schedule_core(
+        starting_portfolio=starting_portfolio,
+        fire_age=fire_age,
+        years_in_retirement=years_in_retirement,
+        annual_spending_base=annual_spending_base,
+        pension_public_start_age=pension_public_start_age,
+        pension_public_net_annual=pension_public_net_annual,
+        plan_private_start_age=plan_private_start_age,
+        plan_private_duration_years=plan_private_duration_years,
+        plan_private_net_annual=plan_private_net_annual,
+        other_income_post_pension_annual=other_income_post_pension_annual,
+        pre_pension_extra_cost_annual=pre_pension_extra_cost_annual,
+        expected_return=expected_return,
+        inflation_rate=inflation_rate,
+        tax_rate_on_gains=tax_rate_on_gains,
+    )
 
 
 def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
@@ -826,6 +1129,24 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     }
     annual_withdrawal_base = float(params.get("annual_spending_for_target", params["gastos_anuales"]))
     tax_rate_hint = 0.19 if params["regimen_fiscal"] in ("España - Fondos de Inversión", "España - Cartera Directa") else 0.15
+
+    # Use scenario-specific annual return from path-level market returns (robust vs contributions).
+    default_ret = float(params["rentabilidad_neta_simulacion"])
+    percentile_labels = ["P5", "P25", "P50", "P75", "P95"]
+    raw_return_map = simulation_results.get("path_return_percentiles")
+    if not isinstance(raw_return_map, dict):
+        raw_return_map = {k: default_ret for k in percentile_labels}
+
+    raw_returns = [raw_return_map[label] for label in percentile_labels]
+    # Enforce coherence: favorable percentiles cannot have lower expected return than adverse ones.
+    coherent_returns: List[float] = []
+    current_floor = -1.0
+    for r in raw_returns:
+        current_floor = max(current_floor, r)
+        coherent_returns.append(float(min(0.60, max(-0.60, current_floor))))
+    scenario_expected_return = {
+        label: coherent_returns[idx] for idx, label in enumerate(percentile_labels)
+    }
     two_stage_enabled = params.get("two_stage_retirement_model", False)
     stage1_years = 0
     annual_withdrawal_stage1 = annual_withdrawal_base
@@ -851,6 +1172,7 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
 
     dec_tables: Dict[str, pd.DataFrame] = {}
     for label, start_portfolio in starting_portfolios.items():
+        expected_return_scenario = scenario_expected_return.get(label, default_ret)
         if two_stage_enabled:
             dec_tables[label] = build_decumulation_table_two_stage_schedule(
                 starting_portfolio=start_portfolio,
@@ -864,7 +1186,7 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
                 plan_private_net_annual=plan_private_net_annual,
                 other_income_post_pension_annual=other_income_post,
                 pre_pension_extra_cost_annual=float(params.get("coste_pre_pension_anual", 0.0)),
-                expected_return=params["rentabilidad_neta_simulacion"],
+                expected_return=expected_return_scenario,
                 inflation_rate=params["inflacion"],
                 tax_rate_on_gains=tax_rate_hint,
             )
@@ -873,7 +1195,7 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
                 starting_portfolio=start_portfolio,
                 annual_withdrawal_base=annual_withdrawal_base,
                 years_in_retirement=years_in_retirement,
-                expected_return=params["rentabilidad_neta_simulacion"],
+                expected_return=expected_return_scenario,
                 inflation_rate=params["inflacion"],
                 tax_rate_on_gains=tax_rate_hint,
             )
@@ -913,11 +1235,52 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     tabs = st.tabs(tab_labels)
     for tab, label in zip(tabs, percentile_series.keys()):
         with tab:
+            implied_return = float(scenario_expected_return.get(label, params["rentabilidad_neta_simulacion"]))
+            st.metric(
+                "📈 Retorno anual implícito usado",
+                f"{implied_return*100:.2f}%",
+                delta="Aplicado a este escenario",
+                delta_color="off",
+            )
+
+            dec_display_df = dec_tables[label].copy()
+            if {
+                "Capital inicial (€)",
+                "Crecimiento neto (€)",
+                "Retirada anual (€)",
+                "Capital final (€)",
+            }.issubset(dec_display_df.columns):
+                dec_display_df["Chequeo flujo (€)"] = (
+                    dec_display_df["Capital inicial (€)"]
+                    + dec_display_df["Crecimiento neto (€)"]
+                    - dec_display_df["Retirada anual (€)"]
+                    - dec_display_df["Capital final (€)"]
+                )
+
+            base_order = [
+                "Año jubilación",
+                "Edad",
+                "Tramo",
+                "Capital inicial (€)",
+                "Ingreso pensión pública (€)",
+                "Ingreso plan privado (€)",
+                "Otras rentas (€)",
+                "Coste extra pre-pensión (€)",
+                "Retirada anual (€)",
+                "Crecimiento neto (€)",
+                "Capital final (€)",
+                "Chequeo flujo (€)",
+                "Capital agotado",
+            ]
+            ordered_cols = [c for c in base_order if c in dec_display_df.columns]
+            dec_display_df = dec_display_df[ordered_cols]
+
             format_map = {
                 "Capital inicial (€)": "€{:,.0f}",
                 "Retirada anual (€)": "€{:,.0f}",
                 "Crecimiento neto (€)": "€{:,.0f}",
                 "Capital final (€)": "€{:,.0f}",
+                "Chequeo flujo (€)": "€{:,.2f}",
             }
             for optional_col in (
                 "Ingreso pensión pública (€)",
@@ -925,15 +1288,30 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
                 "Otras rentas (€)",
                 "Coste extra pre-pensión (€)",
             ):
-                if optional_col in dec_tables[label].columns:
+                if optional_col in dec_display_df.columns:
                     format_map[optional_col] = "€{:,.0f}"
             st.dataframe(
-                dec_tables[label].style.format(format_map),
+                dec_display_df.style.format(format_map),
                 width="stretch",
                 hide_index=True,
             )
+            if "Chequeo flujo (€)" in dec_display_df.columns:
+                max_abs_check = float(dec_display_df["Chequeo flujo (€)"].abs().max())
+                if max_abs_check > 0.01:
+                    st.warning(
+                        f"Se detectó descuadre contable máximo de €{max_abs_check:,.2f} en esta tabla."
+                    )
+                else:
+                    st.caption("Chequeo de flujo OK: columnas de capital/retiro/cuadre son coherentes.")
 
     with st.expander("Supuestos del cuadro de gasto de capital", expanded=False):
+        cagr_text = (
+            f"P5 {scenario_expected_return['P5']*100:.2f}% · "
+            f"P25 {scenario_expected_return['P25']*100:.2f}% · "
+            f"P50 {scenario_expected_return['P50']*100:.2f}% · "
+            f"P75 {scenario_expected_return['P75']*100:.2f}% · "
+            f"P95 {scenario_expected_return['P95']*100:.2f}%"
+        )
         if two_stage_enabled:
             st.write(
                 "- Capital inicial: percentiles 5, 25, 50, 75 y 95 al final del horizonte de acumulación.\n"
@@ -943,7 +1321,7 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
                 f"durante {plan_private_duration_years} años.\n"
                 f"- Otras rentas post-pensión: €{other_income_post:,.0f}/año.\n"
                 "- Ambos tramos se actualizan por inflación año a año.\n"
-                f"- Retorno anual usado: {params['rentabilidad_neta_simulacion']*100:.2f}%.\n"
+                f"- Retorno anual usado por escenario (CAGR implícito de acumulación): {cagr_text}.\n"
                 f"- Impuesto orientativo sobre crecimiento: {tax_rate_hint*100:.1f}%.\n"
                 "- Es una aproximación para planificación; no sustituye un plan de retiro personalizado."
             )
@@ -951,7 +1329,7 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
             st.write(
                 "- Capital inicial: percentiles 5, 25, 50, 75 y 95 al final del horizonte de acumulación.\n"
                 f"- Retirada base anual: €{annual_withdrawal_base:,.0f} (se actualiza por inflación).\n"
-                f"- Retorno anual usado: {params['rentabilidad_neta_simulacion']*100:.2f}%.\n"
+                f"- Retorno anual usado por escenario (CAGR implícito de acumulación): {cagr_text}.\n"
                 f"- Impuesto orientativo sobre crecimiento: {tax_rate_hint*100:.1f}%.\n"
                 "- Es una aproximación para planificación; no sustituye un plan de retiro personalizado."
             )
@@ -1016,7 +1394,9 @@ def monte_carlo_simulation(
         return result
 
     if model_type == "backtest":
-        historical = load_historical_annual_returns(strategy=historical_strategy)
+        historical_years, historical_returns, historical_months = load_historical_annual_series(
+            strategy=historical_strategy
+        )
         result = backtest_rolling_windows(
             initial_wealth=initial_wealth,
             monthly_contribution=monthly_contribution,
@@ -1025,7 +1405,9 @@ def monte_carlo_simulation(
             annual_spending=annual_spending,
             safe_withdrawal_rate=safe_withdrawal_rate,
             contribution_growth_rate=contribution_growth_rate,
-            historical_returns=historical,
+            historical_returns=historical_returns,
+            historical_years=historical_years,
+            historical_months_observed=historical_months,
             tax_pack=tax_pack,
             region=region,
         )
@@ -1051,21 +1433,22 @@ def monte_carlo_simulation(
     return result
 
 
-def get_fiscal_return_adjustment(regimen_fiscal: str, include_optimización: bool) -> float:
+def get_fiscal_return_adjustment(
+    regimen_fiscal: str,
+    include_optimización: bool,
+    fiscal_mode: str = FISCAL_MODE_ES_TAXPACK,
+    intl_tax_rates: Optional[Dict[str, float]] = None,
+) -> float:
     """
     Approximate annual return drag from taxes/friction by regime.
     This ensures fiscal selector changes simulation outcomes.
     """
-    base_drag = {
-        "España - Fondos de Inversión": 0.003,
-        "España - Cartera Directa": 0.012,
-        "Otro": 0.008,
-    }.get(regimen_fiscal, 0.008)
-
-    if include_optimización and regimen_fiscal == "España - Fondos de Inversión":
-        base_drag = max(0.0, base_drag - 0.0015)
-
-    return base_drag
+    return get_effective_fiscal_drag(
+        regimen_fiscal=regimen_fiscal,
+        include_optimization=include_optimización,
+        fiscal_mode=fiscal_mode,
+        intl_tax_rates=intl_tax_rates,
+    )
 
 
 def find_years_to_fire(median_real_path: np.ndarray, fire_target: float) -> Optional[int]:
@@ -1131,16 +1514,155 @@ def render_sidebar() -> Dict:
     st.sidebar.markdown("## ⚙️ Panel de Control")
     st.sidebar.divider()
 
+    loaded_profile_config = st.session_state.get("loaded_profile_config", {})
+    loaded_profile_warnings = st.session_state.get("loaded_profile_warnings", [])
+
+    def apply_loaded_profile_to_widget_state(config: Dict[str, Any]) -> None:
+        """Map profile config keys to widget state keys so controls reflect loaded JSON."""
+        key_map = {
+            "modo_guiado": "modo_guiado_key",
+            "setup_mode": "setup_mode_key",
+            "profile_name": "profile_name_key",
+            "apply_profile_defaults": "apply_profile_defaults_key",
+            "gastos_anuales": "gastos_anuales_key",
+            "safe_withdrawal_rate": "safe_withdrawal_rate_key",
+            "edad_actual": "edad_actual_key",
+            "edad_objetivo": "edad_objetivo_key",
+            "vivienda_habitual_valor": "vivienda_habitual_valor_key",
+            "vivienda_habitual_hipoteca": "vivienda_habitual_hipoteca_key",
+            "incluir_cuota_vivienda_en_simulacion": "incluir_cuota_vivienda_en_simulacion_key",
+            "aplicar_ajuste_vivienda_habitual": "aplicar_ajuste_vivienda_habitual_key",
+            "ahorro_vivienda_habitual_anual": "ahorro_vivienda_habitual_anual_key",
+            "inmuebles_invertibles_valor": "inmuebles_invertibles_valor_key",
+            "inmuebles_invertibles_hipoteca": "inmuebles_invertibles_hipoteca_key",
+            "incluir_cuota_inmuebles_en_simulacion": "incluir_cuota_inmuebles_en_simulacion_key",
+            "otras_deudas": "otras_deudas_key",
+            "usar_capital_invertible_ampliado": "usar_capital_invertible_ampliado_key",
+            "renta_bruta_alquiler_anual": "renta_bruta_alquiler_anual_key",
+            "usar_modelo_avanzado_alquiler": "usar_modelo_avanzado_alquiler_key",
+            "alquiler_costes_vacancia_pct": "alquiler_costes_vacancia_pct_key",
+            "alquiler_irpf_efectivo_pct": "alquiler_irpf_efectivo_pct_key",
+            "incluir_rentas_alquiler_en_simulacion": "incluir_rentas_alquiler_en_simulacion_key",
+            "include_pension_in_simulation": "include_pension_in_simulation_key",
+            "two_stage_retirement_model": "two_stage_retirement_model_key",
+            "edad_pension_oficial": "edad_pension_oficial_key",
+            "edad_inicio_pension_publica": "edad_inicio_pension_publica_key",
+            "bonificacion_demora_pct": "bonificacion_demora_pct_key",
+            "pension_publica_neta_anual": "pension_publica_neta_anual_key",
+            "edad_inicio_plan_privado": "edad_inicio_plan_privado_key",
+            "duracion_plan_privado_anos": "duracion_plan_privado_anos_key",
+            "plan_pensiones_privado_neto_anual": "plan_pensiones_privado_neto_anual_key",
+            "otras_rentas_post_jubilacion_netas": "otras_rentas_post_jubilacion_netas_key",
+            "coste_pre_pension_anual": "coste_pre_pension_anual_key",
+            "rentabilidad_esperada": "rentabilidad_esperada_key",
+            "volatilidad": "volatilidad_key",
+            "inflacion": "inflacion_key",
+            "inflacionar_aportacion": "inflacionar_aportacion_key",
+            "fiscal_priority": "fiscal_priority_key",
+            "regimen_fiscal": "regimen_fiscal_key",
+            "include_optimización": "include_optimizacion_key",
+            "taxable_withdrawal_ratio_mode": "taxable_withdrawal_ratio_mode_key",
+            "taxable_withdrawal_ratio": "taxable_withdrawal_ratio_key",
+            "tax_year": "tax_year_key",
+            "region": "region_key",
+        }
+        for cfg_key, widget_key in key_map.items():
+            if cfg_key in config:
+                value = config[cfg_key]
+                if cfg_key == "safe_withdrawal_rate":
+                    value = float(value) * 100.0
+                elif cfg_key in ("rentabilidad_esperada", "volatilidad", "inflacion"):
+                    value = float(value) * 100.0
+                elif cfg_key == "bonificacion_demora_pct":
+                    value = float(value) * 100.0
+                elif cfg_key == "taxable_withdrawal_ratio":
+                    value = float(value) * 100.0
+                st.session_state[widget_key] = value
+
+        if "fiscal_mode" in config:
+            st.session_state["fiscal_mode_label_key"] = (
+                "Internacional básico"
+                if config["fiscal_mode"] == FISCAL_MODE_INTL_BASIC
+                else "España (Tax Pack)"
+            )
+        if "intl_tax_rates" in config and isinstance(config["intl_tax_rates"], dict):
+            rates = config["intl_tax_rates"]
+            st.session_state["intl_tax_gains_key"] = float(rates.get("gains", 0.10)) * 100.0
+            st.session_state["intl_tax_dividends_key"] = float(rates.get("dividends", 0.15)) * 100.0
+            st.session_state["intl_tax_interest_key"] = float(rates.get("interest", 0.20)) * 100.0
+            st.session_state["intl_tax_wealth_key"] = float(rates.get("wealth", 0.00)) * 100.0
+
+        if "patrimonio_inicial" in config:
+            st.session_state["patrimonio_exact_mode"] = True
+            st.session_state["patrimonio_exact_value"] = int(float(config["patrimonio_inicial"]))
+        if "aportacion_mensual" in config:
+            st.session_state["aportacion_exact_mode"] = True
+            st.session_state["aportacion_exact_value"] = int(float(config["aportacion_mensual"]))
+        if "cuota_hipoteca_vivienda_mensual" in config:
+            st.session_state["primary_mortgage_payment_exact_mode"] = True
+            st.session_state["primary_mortgage_payment_exact_value"] = int(float(config["cuota_hipoteca_vivienda_mensual"]))
+        if "meses_hipoteca_vivienda_restantes_exact_mode" in config:
+            st.session_state["primary_mortgage_months_exact_mode"] = bool(config["meses_hipoteca_vivienda_restantes_exact_mode"])
+        if "meses_hipoteca_vivienda_restantes" in config:
+            st.session_state["primary_mortgage_months_exact_value"] = int(float(config["meses_hipoteca_vivienda_restantes"]))
+        if "cuota_hipoteca_inmuebles_mensual" in config:
+            st.session_state["investment_mortgage_payment_exact_mode"] = True
+            st.session_state["investment_mortgage_payment_exact_value"] = int(float(config["cuota_hipoteca_inmuebles_mensual"]))
+        if "meses_hipoteca_inmuebles_restantes_exact_mode" in config:
+            st.session_state["investment_mortgage_months_exact_mode"] = bool(config["meses_hipoteca_inmuebles_restantes_exact_mode"])
+        if "meses_hipoteca_inmuebles_restantes" in config:
+            st.session_state["investment_mortgage_months_exact_value"] = int(float(config["meses_hipoteca_inmuebles_restantes"]))
+
+    with st.sidebar.expander("💾 Perfil (cargar JSON)", expanded=False):
+        profile_file = st.file_uploader(
+            "Cargar perfil FIRE (.json)",
+            type=["json"],
+            key="profile_json_uploader",
+        )
+        col_apply_profile, col_clear_profile = st.columns(2)
+        with col_apply_profile:
+            if st.button("Aplicar perfil", key="apply_profile_button", width="stretch"):
+                if profile_file is not None:
+                    try:
+                        payload = json.loads(profile_file.read().decode("utf-8"))
+                        safe_cfg, warnings_profile = deserialize_profile(payload)
+                        st.session_state["loaded_profile_config"] = safe_cfg
+                        st.session_state["loaded_profile_warnings"] = warnings_profile
+                        apply_loaded_profile_to_widget_state(safe_cfg)
+                        st.success("Perfil cargado. Se aplicará en esta ejecución.")
+                        loaded_profile_config = safe_cfg
+                        loaded_profile_warnings = warnings_profile
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo cargar el perfil: {e}")
+                else:
+                    st.warning("Selecciona un archivo JSON antes de aplicar.")
+        with col_clear_profile:
+            if st.button("Limpiar perfil", key="clear_profile_button", width="stretch"):
+                st.session_state.pop("loaded_profile_config", None)
+                st.session_state.pop("loaded_profile_warnings", None)
+                loaded_profile_config = {}
+                loaded_profile_warnings = []
+                st.info("Perfil cargado eliminado.")
+
+        if loaded_profile_config:
+            st.caption("Perfil cargado activo: se aplicará sobre los controles actuales.")
+        if loaded_profile_warnings:
+            st.warning(" | ".join(loaded_profile_warnings))
+        st.caption("Carga perfil aquí. Para exportar/guardar usa el bloque `📥 Exportar Resultados`.")
+
     # STEP 1: Experience and setup mode
     st.sidebar.markdown("### 1) Configuración inicial")
     modo_guiado = st.sidebar.checkbox(
         "Modo guiado (explicaciones simples)",
         value=True,
+        key="modo_guiado_key",
         help="Muestra ayudas adicionales para usuarios no técnicos.",
     )
     setup_mode = st.sidebar.radio(
         "¿Cómo quieres configurar?",
         options=["Perfil FIRE", "Personalizado"],
+        key="setup_mode_key",
         help="Perfil FIRE aplica una plantilla inicial; Personalizado deja todo manual.",
     )
 
@@ -1156,11 +1678,13 @@ def render_sidebar() -> Dict:
         profile_name = st.sidebar.selectbox(
             "Perfil FIRE",
             options=[p for p in WEB_PROFILES.keys() if p != "Personalizado"],
+            key="profile_name_key",
             help="Plantilla con valores sugeridos para gastos, retorno, inflación y SWR.",
         )
         apply_profile_defaults = st.sidebar.checkbox(
             "Bloquear parámetros del perfil",
             value=True,
+            key="apply_profile_defaults_key",
             help="Si está activo, esos parámetros quedan en modo solo lectura.",
         )
         profile_defaults = WEB_PROFILES[profile_name] or profile_defaults
@@ -1182,6 +1706,7 @@ def render_sidebar() -> Dict:
         max_value=1_000_000,
         value=int(profile_defaults["gastos_anuales"]),
         step=1_000,
+        key="gastos_anuales_key",
         disabled=lock_profile_fields,
         help="Se interpreta en euros de hoy. El modelo ajusta por inflación para años futuros.",
     )
@@ -1191,6 +1716,7 @@ def render_sidebar() -> Dict:
         max_value=6.0,
         value=float(profile_defaults["safe_withdrawal_rate"] * 100),
         step=0.1,
+        key="safe_withdrawal_rate_key",
         disabled=lock_profile_fields,
         help="Tasa de retirada segura usada para calcular objetivo FIRE.",
     ) / 100
@@ -1208,6 +1734,83 @@ def render_sidebar() -> Dict:
         )
 
     st.sidebar.divider()
+
+    def select_currency_with_exact_input(
+        label: str,
+        options: List[int],
+        default_value: int,
+        exact_label: str,
+        exact_input_label: str,
+        max_exact: int,
+        step_exact: int,
+        help_text: Optional[str] = None,
+        key_prefix: Optional[str] = None,
+    ) -> float:
+        """Render currency slider with optional exact input override."""
+        state_key = key_prefix or re.sub(r"[^a-z0-9_]+", "_", exact_input_label.lower())
+        use_exact = st.sidebar.checkbox(
+            exact_label,
+            value=bool(st.session_state.get(f"{state_key}_exact_mode", False)),
+            key=f"{state_key}_exact_mode",
+            help="Permite fijar un importe exacto sin saltos de la barra.",
+        )
+        if use_exact:
+            selected_value = st.sidebar.number_input(
+                exact_input_label,
+                min_value=0,
+                max_value=max_exact,
+                value=int(st.session_state.get(f"{state_key}_exact_value", default_value)),
+                step=step_exact,
+                key=f"{state_key}_exact_value",
+            )
+        else:
+            selected_value = st.sidebar.select_slider(
+                label,
+                options=options,
+                value=int(st.session_state.get(f"{state_key}_slider_value", default_value)),
+                format_func=lambda x: f"€{x:,.0f}",
+                help=help_text,
+                key=f"{state_key}_slider_value",
+            )
+        return float(selected_value)
+
+    def select_int_with_exact_input(
+        label: str,
+        options: List[int],
+        default_value: int,
+        exact_checkbox_label: str,
+        exact_input_label: str,
+        max_exact: int,
+        key_prefix: str,
+    ) -> Tuple[int, bool]:
+        """Render integer select slider with optional exact input override."""
+        use_exact = st.checkbox(
+            exact_checkbox_label,
+            value=bool(st.session_state.get(f"{key_prefix}_exact_mode", False)),
+            key=f"{key_prefix}_exact_mode",
+            help="Permite fijar un valor exacto sin los saltos de la barra.",
+        )
+        if use_exact:
+            exact_value = int(
+                st.number_input(
+                    exact_input_label,
+                    min_value=0,
+                    max_value=max_exact,
+                    value=int(st.session_state.get(f"{key_prefix}_exact_value", default_value)),
+                    step=1,
+                    key=f"{key_prefix}_exact_value",
+                )
+            )
+            return exact_value, True
+        selected = int(
+            st.select_slider(
+                label,
+                options=options,
+                value=int(st.session_state.get(f"{key_prefix}_slider_value", default_value)),
+                key=f"{key_prefix}_slider_value",
+            )
+        )
+        return selected, False
 
     # STEP 3: Current situation and horizon
     st.sidebar.markdown("### 3) Situación actual")
@@ -1230,29 +1833,20 @@ def render_sidebar() -> Dict:
     )
     patrimonio_default_value = patrimonio_options[default_idx]
 
-    patrimonio_inicial = st.sidebar.select_slider(
-        "Patrimonio actual (€)",
+    patrimonio_inicial = select_currency_with_exact_input(
+        label="Patrimonio actual (€)",
         options=patrimonio_options,
-        value=patrimonio_default_value,
-        format_func=lambda x: f"€{x:,.0f}",
-        help=(
+        default_value=patrimonio_default_value,
+        exact_label="Introducir patrimonio exacto",
+        exact_input_label="Patrimonio actual exacto (€)",
+        max_exact=20_000_000,
+        step_exact=1_000,
+        help_text=(
             "Escala exponencial: más precisión en importes bajos y "
             "más recorrido en importes altos."
         ),
+        key_prefix="patrimonio",
     )
-    usar_patrimonio_exacto = st.sidebar.checkbox(
-        "Introducir patrimonio exacto",
-        value=False,
-        help="Permite fijar importe exacto sin saltos de la barra.",
-    )
-    if usar_patrimonio_exacto:
-        patrimonio_inicial = st.sidebar.number_input(
-            "Patrimonio actual exacto (€)",
-            min_value=0,
-            max_value=20_000_000,
-            value=int(patrimonio_inicial),
-            step=1_000,
-        )
 
     aportacion_min_nonzero = 100
     aportacion_max = 50_000
@@ -1273,29 +1867,20 @@ def render_sidebar() -> Dict:
     )
     aportacion_default_value = aportacion_options[aportacion_default_idx]
 
-    aportacion_mensual = st.sidebar.select_slider(
-        "Aportación mensual (€)",
+    aportacion_mensual = select_currency_with_exact_input(
+        label="Aportación mensual (€)",
         options=aportacion_options,
-        value=aportacion_default_value,
-        format_func=lambda x: f"€{x:,.0f}",
-        help=(
+        default_value=aportacion_default_value,
+        exact_label="Introducir aportación exacta",
+        exact_input_label="Aportación mensual exacta (€)",
+        max_exact=200_000,
+        step_exact=50,
+        help_text=(
             "Escala exponencial de €0 a €50.000: más precisión en importes bajos "
             "y mejor recorrido en importes altos."
         ),
+        key_prefix="aportacion",
     )
-    usar_aportacion_exacta = st.sidebar.checkbox(
-        "Introducir aportación exacta",
-        value=False,
-        help="Permite fijar aportación mensual exacta sin saltos de la barra.",
-    )
-    if usar_aportacion_exacta:
-        aportacion_mensual = st.sidebar.number_input(
-            "Aportación mensual exacta (€)",
-            min_value=0,
-            max_value=200_000,
-            value=int(aportacion_mensual),
-            step=50,
-        )
 
     edad_actual = st.sidebar.slider(
         "Edad actual",
@@ -1303,6 +1888,7 @@ def render_sidebar() -> Dict:
         max_value=100,
         value=35,
         step=1,
+        key="edad_actual_key",
     )
     edad_objetivo = st.sidebar.slider(
         "Edad objetivo FIRE",
@@ -1310,12 +1896,27 @@ def render_sidebar() -> Dict:
         max_value=100,
         value=50,
         step=1,
+        key="edad_objetivo_key",
     )
 
     if modo_guiado:
         st.sidebar.caption(
             "Patrimonio = lo que ya tienes invertido. Aportación = lo que añades cada mes."
         )
+
+    cuota_min_nonzero = 50
+    cuota_max = 15_000
+    cuota_steps = 120
+    cuota_scale = np.geomspace(cuota_min_nonzero, cuota_max, cuota_steps)
+    cuota_options = [0]
+    for v in cuota_scale:
+        rounded = int(round(float(v) / 25) * 25)
+        if rounded > cuota_options[-1]:
+            cuota_options.append(rounded)
+    if cuota_options[-1] != cuota_max:
+        cuota_options.append(cuota_max)
+
+    months_options = list(range(0, 601))
 
     with st.sidebar.expander("🏠 Patrimonio inmobiliario y deudas (opcional)", expanded=False):
         vivienda_habitual_valor = st.number_input(
@@ -1324,6 +1925,7 @@ def render_sidebar() -> Dict:
             max_value=10_000_000,
             value=0,
             step=10_000,
+            key="vivienda_habitual_valor_key",
         )
         vivienda_habitual_hipoteca = st.number_input(
             "Hipoteca vivienda principal (€)",
@@ -1331,10 +1933,43 @@ def render_sidebar() -> Dict:
             max_value=10_000_000,
             value=0,
             step=10_000,
+            key="vivienda_habitual_hipoteca_key",
         )
+        incluir_cuota_vivienda_en_simulacion = st.checkbox(
+            "Incluir cuota de hipoteca de vivienda principal en simulación",
+            value=True,
+            key="incluir_cuota_vivienda_en_simulacion_key",
+            disabled=vivienda_habitual_hipoteca <= 0,
+            help="Resta esta cuota de tu capacidad de ahorro antes de FIRE y, si sigue pendiente en FIRE, la suma al gasto anual.",
+        )
+        cuota_hipoteca_vivienda_mensual = 0.0
+        meses_hipoteca_vivienda_restantes = 0
+        meses_hipoteca_vivienda_restantes_exact_mode = False
+        if vivienda_habitual_hipoteca > 0:
+            cuota_hipoteca_vivienda_mensual = select_currency_with_exact_input(
+                "Cuota mensual hipoteca vivienda principal (€)",
+                options=cuota_options,
+                default_value=800 if 800 in cuota_options else cuota_options[min(len(cuota_options) - 1, 10)],
+                exact_label="Introducir cuota exacta vivienda",
+                exact_input_label="Cuota exacta hipoteca vivienda (€)",
+                max_exact=50_000,
+                step_exact=25,
+                help_text="Importe total mensual de la cuota actual de hipoteca.",
+                key_prefix="primary_mortgage_payment",
+            )
+            meses_hipoteca_vivienda_restantes, meses_hipoteca_vivienda_restantes_exact_mode = select_int_with_exact_input(
+                label="Meses restantes hipoteca vivienda principal",
+                options=months_options,
+                default_value=240,
+                exact_checkbox_label="Introducir meses exactos vivienda",
+                exact_input_label="Meses exactos hipoteca vivienda principal",
+                max_exact=600,
+                key_prefix="primary_mortgage_months",
+            )
         aplicar_ajuste_vivienda_habitual = st.checkbox(
             "Ajustar gasto de jubilación por vivienda habitual pagada",
             value=False,
+            key="aplicar_ajuste_vivienda_habitual_key",
             disabled=vivienda_habitual_valor <= 0,
             help="Si ya tienes vivienda habitual, parte del gasto de jubilación puede reducirse (alquiler/hipoteca).",
         )
@@ -1344,6 +1979,7 @@ def render_sidebar() -> Dict:
             max_value=200_000,
             value=0,
             step=500,
+            key="ahorro_vivienda_habitual_anual_key",
             disabled=not aplicar_ajuste_vivienda_habitual,
             help="Cuánto gasto anual dejarías de necesitar cubrir con la cartera por tener vivienda habitual.",
         )
@@ -1353,6 +1989,7 @@ def render_sidebar() -> Dict:
             max_value=10_000_000,
             value=0,
             step=10_000,
+            key="inmuebles_invertibles_valor_key",
         )
         inmuebles_invertibles_hipoteca = st.number_input(
             "Hipoteca inmuebles invertibles (€)",
@@ -1360,17 +1997,51 @@ def render_sidebar() -> Dict:
             max_value=10_000_000,
             value=0,
             step=10_000,
+            key="inmuebles_invertibles_hipoteca_key",
         )
+        incluir_cuota_inmuebles_en_simulacion = st.checkbox(
+            "Incluir cuota de hipoteca de inmuebles invertibles en simulación",
+            value=True,
+            key="incluir_cuota_inmuebles_en_simulacion_key",
+            disabled=inmuebles_invertibles_hipoteca <= 0,
+            help="Aplica el mismo criterio de flujos: resta ahorro pre-FIRE y puede sumar gasto si sigue viva tras FIRE.",
+        )
+        cuota_hipoteca_inmuebles_mensual = 0.0
+        meses_hipoteca_inmuebles_restantes = 0
+        meses_hipoteca_inmuebles_restantes_exact_mode = False
+        if inmuebles_invertibles_hipoteca > 0:
+            cuota_hipoteca_inmuebles_mensual = select_currency_with_exact_input(
+                "Cuota mensual hipoteca inmuebles invertibles (€)",
+                options=cuota_options,
+                default_value=600 if 600 in cuota_options else cuota_options[min(len(cuota_options) - 1, 9)],
+                exact_label="Introducir cuota exacta inmuebles invertibles",
+                exact_input_label="Cuota exacta hipoteca inmuebles invertibles (€)",
+                max_exact=50_000,
+                step_exact=25,
+                help_text="Cuota mensual agregada de hipotecas en inmuebles alquilables/invertibles.",
+                key_prefix="investment_mortgage_payment",
+            )
+            meses_hipoteca_inmuebles_restantes, meses_hipoteca_inmuebles_restantes_exact_mode = select_int_with_exact_input(
+                label="Meses restantes hipoteca inmuebles invertibles",
+                options=months_options,
+                default_value=240,
+                exact_checkbox_label="Introducir meses exactos inmuebles invertibles",
+                exact_input_label="Meses exactos hipoteca inmuebles invertibles",
+                max_exact=600,
+                key_prefix="investment_mortgage_months",
+            )
         otras_deudas = st.number_input(
             "Otras deudas (€)",
             min_value=0,
             max_value=10_000_000,
             value=0,
             step=5_000,
+            key="otras_deudas_key",
         )
         usar_capital_invertible_ampliado = st.checkbox(
             "Usar capital invertible ampliado como base de simulación",
             value=False,
+            key="usar_capital_invertible_ampliado_key",
             help="Usa cartera líquida + equity de inmuebles invertibles - otras deudas. No incluye vivienda habitual.",
         )
         renta_bruta_alquiler_anual = st.number_input(
@@ -1379,16 +2050,50 @@ def render_sidebar() -> Dict:
             max_value=2_000_000,
             value=0,
             step=1_000,
+            key="renta_bruta_alquiler_anual_key",
             help="Ingresos brutos anuales por alquiler de inmuebles.",
         )
+        usar_modelo_avanzado_alquiler = st.checkbox(
+            "Modelo avanzado de alquiler (vacancia/gastos/fiscalidad simple)",
+            value=False,
+            key="usar_modelo_avanzado_alquiler_key",
+            disabled=renta_bruta_alquiler_anual <= 0,
+            help="Convierte renta bruta en neta restando vacancia, gastos e IRPF efectivo aproximado.",
+        )
+        alquiler_costes_vacancia_pct = 0.0
+        alquiler_irpf_efectivo_pct = 0.0
+        if usar_modelo_avanzado_alquiler:
+            alquiler_costes_vacancia_pct = st.slider(
+                "Costes + vacancia sobre renta bruta (%)",
+                min_value=0.0,
+                max_value=60.0,
+                value=20.0,
+                step=0.5,
+                key="alquiler_costes_vacancia_pct_key",
+            )
+            alquiler_irpf_efectivo_pct = st.slider(
+                "IRPF efectivo sobre rendimiento neto (%)",
+                min_value=0.0,
+                max_value=50.0,
+                value=15.0,
+                step=0.5,
+                key="alquiler_irpf_efectivo_pct_key",
+                help="Aproximación fiscal anual para no sobreestimar la renta disponible.",
+            )
         incluir_rentas_alquiler_en_simulacion = st.checkbox(
             "Incluir rentas de alquiler en simulación",
             value=True,
-            help="Suma la renta al ahorro anual y reduce el gasto que debe cubrir la cartera en FIRE (aproximación).",
+            key="incluir_rentas_alquiler_en_simulacion_key",
+            help="Suma la renta al ahorro anual y reduce el gasto que debe cubrir la cartera en FIRE (aproximación neta si activas modelo avanzado).",
         )
-        st.caption(
-            "Nota: se usa renta bruta como aproximación. No modela en detalle gastos deducibles, vacancia ni IRPF inmobiliario."
-        )
+        if usar_modelo_avanzado_alquiler:
+            st.caption(
+                "Modelo avanzado activo: renta neta = renta bruta × (1 - costes/vacancia) × (1 - IRPF efectivo)."
+            )
+        else:
+            st.caption(
+                "Modo simple: se usa renta bruta como aproximación. No modela gastos deducibles, vacancia ni IRPF inmobiliario."
+            )
 
     with st.sidebar.expander("🧓 Pensión y retiro en 2 tramos (opcional)", expanded=False):
         include_pension_in_simulation = st.checkbox(
@@ -1443,9 +2148,11 @@ def render_sidebar() -> Dict:
             disabled=not include_pension_in_simulation,
         )
         years_delta = edad_inicio_pension_publica - edad_pension_oficial
-        pension_publica_neta_anual_efectiva = max(
-            0.0,
-            pension_publica_neta_anual * (1 + (bonificacion_demora_pct * years_delta)),
+        pension_publica_neta_anual_efectiva = calculate_effective_public_pension_annual(
+            pension_publica_neta_anual=pension_publica_neta_anual,
+            edad_pension_oficial=edad_pension_oficial,
+            edad_inicio_pension_publica=edad_inicio_pension_publica,
+            ajuste_anual_pct=bonificacion_demora_pct,
         )
         if include_pension_in_simulation and years_delta > 0:
             st.caption(
@@ -1503,13 +2210,16 @@ def render_sidebar() -> Dict:
         pension_neta_anual = pension_neta_anual if include_pension_in_simulation else 0.0
 
         coste_pre_pension_anual = st.number_input(
-            "Coste anual extra pre-pensión (€ de hoy)",
+            "Coste anual extra antes de pensión pública (€ de hoy)",
             min_value=0,
             max_value=200_000,
             value=0,
             step=500,
             disabled=not include_pension_in_simulation or not two_stage_retirement_model,
-            help="Ejemplo: coste de cotizaciones voluntarias o gasto adicional temporal antes de pensión.",
+            help=(
+                "No está ligado al rescate del plan privado. "
+                "Aplica solo al tramo previo al inicio de la pensión pública."
+            ),
         )
         if include_pension_in_simulation:
             st.caption(
@@ -1572,6 +2282,21 @@ def render_sidebar() -> Dict:
 
     # STEP 5: Fiscal configuration
     st.sidebar.markdown("### 5) Fiscalidad")
+    fiscal_mode_label = st.sidebar.selectbox(
+        "Modo fiscal",
+        options=["España (Tax Pack)", "Internacional básico"],
+        index=0,
+        help=(
+            "España (Tax Pack): fiscalidad regional española detallada. "
+            "Internacional básico: aproximación con tasas efectivas manuales."
+        ),
+    )
+    fiscal_mode = (
+        FISCAL_MODE_ES_TAXPACK
+        if fiscal_mode_label == "España (Tax Pack)"
+        else FISCAL_MODE_INTL_BASIC
+    )
+
     fiscal_priority = st.sidebar.selectbox(
         "Prioridad fiscal del cálculo",
         options=[
@@ -1581,29 +2306,70 @@ def render_sidebar() -> Dict:
         index=0,
         help="Jubilación: prioriza impuestos al retirar. Acumulación: prioriza impuestos antes de FIRE.",
     )
-    regimen_fiscal = st.sidebar.selectbox(
-        "Régimen fiscal",
-        options=[
-            "España - Fondos de Inversión",
-            "España - Cartera Directa",
-            "Otro",
-        ],
-        help="Aplicar tratamiento fiscal específico",
-    )
-
-    # Tax optimization context for Spanish users
-    if regimen_fiscal == "España - Fondos de Inversión":
-        st.sidebar.info(
-            "⚖️ **Ventaja FIRE en España:** La Ley de Diferimiento permite traspasos exentos entre fondos "
-            "sin tributación, diferiendo impuestos hasta el reembolso final. Esta calculadora usa una "
-            "aproximación de impacto fiscal para comparar escenarios. No sustituye asesoría fiscal profesional."
+    intl_tax_rates: Dict[str, float] = {
+        "gains": 0.10,
+        "dividends": 0.15,
+        "interest": 0.20,
+        "wealth": 0.00,
+    }
+    if fiscal_mode == FISCAL_MODE_ES_TAXPACK:
+        regimen_fiscal = st.sidebar.selectbox(
+            "Régimen fiscal",
+            options=[
+                "España - Fondos de Inversión",
+                "España - Cartera Directa",
+                "Otro",
+            ],
+            help="Aplicar tratamiento fiscal específico",
         )
 
-    include_optimización = st.sidebar.checkbox(
-        "Incluir optimización de traspasos entre fondos",
-        value=False,
-        help="Estrategia de harvest-loss para optimizar impuestos",
-    )
+        # Tax optimization context for Spanish users
+        if regimen_fiscal == "España - Fondos de Inversión":
+            st.sidebar.info(
+                "⚖️ **Ventaja FIRE en España:** La Ley de Diferimiento permite traspasos exentos entre fondos "
+                "sin tributación, diferiendo impuestos hasta el reembolso final. Esta calculadora usa una "
+                "aproximación de impacto fiscal para comparar escenarios. No sustituye asesoría fiscal profesional."
+            )
+
+        include_optimización = st.sidebar.checkbox(
+            "Incluir optimización de traspasos entre fondos",
+            value=False,
+            help="Estrategia de harvest-loss para optimizar impuestos",
+        )
+    else:
+        regimen_fiscal = "Otro"
+        include_optimización = False
+        st.sidebar.info(
+            "🌍 Modo internacional básico: aproximación para acumulación con tasas efectivas manuales."
+        )
+        intl_tax_rates["gains"] = st.sidebar.slider(
+            "Impuesto efectivo plusvalías (%)",
+            min_value=0.0,
+            max_value=60.0,
+            value=10.0,
+            step=0.5,
+        ) / 100.0
+        intl_tax_rates["dividends"] = st.sidebar.slider(
+            "Impuesto efectivo dividendos (%)",
+            min_value=0.0,
+            max_value=60.0,
+            value=15.0,
+            step=0.5,
+        ) / 100.0
+        intl_tax_rates["interest"] = st.sidebar.slider(
+            "Impuesto efectivo intereses (%)",
+            min_value=0.0,
+            max_value=60.0,
+            value=20.0,
+            step=0.5,
+        ) / 100.0
+        intl_tax_rates["wealth"] = st.sidebar.slider(
+            "Impuesto anual efectivo sobre patrimonio (%)",
+            min_value=0.0,
+            max_value=5.0,
+            value=0.0,
+            step=0.1,
+        ) / 100.0
 
     taxable_withdrawal_ratio_mode = st.sidebar.selectbox(
         "Cálculo de parte retirada que tributa",
@@ -1641,7 +2407,7 @@ def render_sidebar() -> Dict:
     region = None
     tax_pack_meta = None
     tax_pack_meta_errors: List[str] = []
-    if regimen_fiscal in ("España - Fondos de Inversión", "España - Cartera Directa"):
+    if fiscal_mode == FISCAL_MODE_ES_TAXPACK and regimen_fiscal in ("España - Fondos de Inversión", "España - Cartera Directa"):
         available_years = list_available_taxpack_years("es")
         if available_years:
             tax_year = st.sidebar.selectbox(
@@ -1708,10 +2474,12 @@ def render_sidebar() -> Dict:
         "gastos_anuales": gastos_anuales,
         "safe_withdrawal_rate": safe_withdrawal_rate,
         "fiscal_priority": fiscal_priority,
+        "fiscal_mode": fiscal_mode,
         "taxable_withdrawal_ratio_mode": taxable_withdrawal_ratio_mode,
         "taxable_withdrawal_ratio": taxable_withdrawal_ratio,
         "regimen_fiscal": regimen_fiscal,
         "include_optimización": include_optimización,
+        "intl_tax_rates": intl_tax_rates,
         "simulation_model": "Monte Carlo (Normal)",
         "tax_year": tax_year,
         "region": region,
@@ -1720,10 +2488,18 @@ def render_sidebar() -> Dict:
         "modo_guiado": modo_guiado,
         "vivienda_habitual_valor": vivienda_habitual_valor,
         "vivienda_habitual_hipoteca": vivienda_habitual_hipoteca,
+        "incluir_cuota_vivienda_en_simulacion": incluir_cuota_vivienda_en_simulacion,
+        "cuota_hipoteca_vivienda_mensual": cuota_hipoteca_vivienda_mensual,
+        "meses_hipoteca_vivienda_restantes": meses_hipoteca_vivienda_restantes,
+        "meses_hipoteca_vivienda_restantes_exact_mode": meses_hipoteca_vivienda_restantes_exact_mode,
         "aplicar_ajuste_vivienda_habitual": aplicar_ajuste_vivienda_habitual,
         "ahorro_vivienda_habitual_anual": ahorro_vivienda_habitual_anual,
         "inmuebles_invertibles_valor": inmuebles_invertibles_valor,
         "inmuebles_invertibles_hipoteca": inmuebles_invertibles_hipoteca,
+        "incluir_cuota_inmuebles_en_simulacion": incluir_cuota_inmuebles_en_simulacion,
+        "cuota_hipoteca_inmuebles_mensual": cuota_hipoteca_inmuebles_mensual,
+        "meses_hipoteca_inmuebles_restantes": meses_hipoteca_inmuebles_restantes,
+        "meses_hipoteca_inmuebles_restantes_exact_mode": meses_hipoteca_inmuebles_restantes_exact_mode,
         # Compatibilidad con nombres anteriores
         "vivienda_principal_valor": vivienda_habitual_valor,
         "vivienda_principal_hipoteca": vivienda_habitual_hipoteca,
@@ -1736,6 +2512,9 @@ def render_sidebar() -> Dict:
         "capital_invertible_ampliado": capital_invertible_ampliado,
         "usar_capital_invertible_ampliado": usar_capital_invertible_ampliado,
         "renta_bruta_alquiler_anual": renta_bruta_alquiler_anual,
+        "usar_modelo_avanzado_alquiler": usar_modelo_avanzado_alquiler,
+        "alquiler_costes_vacancia_pct": alquiler_costes_vacancia_pct,
+        "alquiler_irpf_efectivo_pct": alquiler_irpf_efectivo_pct,
         "incluir_rentas_alquiler_en_simulacion": incluir_rentas_alquiler_en_simulacion,
         "include_pension_in_simulation": include_pension_in_simulation,
         "two_stage_retirement_model": two_stage_retirement_model,
@@ -1755,6 +2534,10 @@ def render_sidebar() -> Dict:
         "net_worth_data": net_worth_data,
         "patrimonio_base_simulacion": patrimonio_base_simulacion,
     }
+
+    # Profile JSON now preloads widget state only; it must not overwrite manual edits each rerun.
+    params["profile_loaded"] = bool(loaded_profile_config)
+    params["profile_loaded_warnings"] = loaded_profile_warnings if loaded_profile_config else []
 
     return params
 
@@ -1907,6 +2690,26 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
 
 def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
     """Render auditable tax trace for selected region/year."""
+    if params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK) == FISCAL_MODE_INTL_BASIC:
+        if params.get("fiscal_priority") == "Jubilación" and params.get("retirement_tax_context"):
+            ctx = params["retirement_tax_context"]
+            st.subheader("🧾 Resumen Fiscal Internacional (aproximación anual)")
+            st.caption(
+                "Estimación simplificada con tasas efectivas manuales para ahorradores con residencia fiscal fuera de España."
+            )
+            col_a, col_b, col_c, col_d = st.columns(4)
+            col_a.metric("Retirada bruta", f"€{ctx['gross_withdrawal_required']:,.0f}")
+            col_b.metric("Impuesto ahorro estimado", f"€{ctx['annual_savings_tax_retirement']:,.0f}")
+            col_c.metric("Impuesto patrimonio estimado", f"€{ctx['annual_wealth_tax_retirement']:,.0f}")
+            col_d.metric("Total fiscal anual", f"€{ctx['total_annual_tax_retirement']:,.0f}")
+        else:
+            st.subheader("🧾 Fiscalidad internacional (aproximación)")
+            st.caption(
+                "En modo internacional básico se aplica un drag fiscal efectivo sobre rentabilidad. "
+                "No se calculan tramos IRPF/Patrimonio por CCAA."
+            )
+        return
+
     if not tax_pack or not params.get("region"):
         return
 
@@ -2231,6 +3034,34 @@ def render_main_chart(simulation_results: Dict, params: Dict) -> None:
         )
     )
 
+    model_name = simulation_results.get("model_name", "")
+    is_backtest = "backtesting" in model_name.lower()
+    if is_backtest:
+        worst_path = simulation_results.get("worst_path_nominal")
+        best_path = simulation_results.get("best_path_nominal")
+        if worst_path is not None and len(worst_path) == len(years):
+            fig.add_trace(
+                go.Scatter(
+                    x=years,
+                    y=worst_path,
+                    mode="lines",
+                    name="Ventana crítica (peor histórica)",
+                    line=dict(color="rgba(231, 76, 60, 0.9)", width=2, dash="dot"),
+                    hovertemplate="<b>Año %{x}</b><br>Peor ventana: €%{y:,.0f}<extra></extra>",
+                )
+            )
+        if best_path is not None and len(best_path) == len(years):
+            fig.add_trace(
+                go.Scatter(
+                    x=years,
+                    y=best_path,
+                    mode="lines",
+                    name="Ventana favorable (mejor histórica)",
+                    line=dict(color="rgba(46, 204, 113, 0.9)", width=2, dash="dot"),
+                    hovertemplate="<b>Año %{x}</b><br>Mejor ventana: €%{y:,.0f}<extra></extra>",
+                )
+            )
+
     fig.update_layout(
         title=f"<b>Evolución del Portafolio - {simulation_results.get('model_name', 'Simulación')}</b>",
         xaxis_title="Años desde hoy",
@@ -2242,6 +3073,35 @@ def render_main_chart(simulation_results: Dict, params: Dict) -> None:
         yaxis=dict(tickformat=",.0f"),
     )
 
+    if is_backtest and simulation_results.get("backtest_diagnostics"):
+        d = simulation_results["backtest_diagnostics"]
+        worst_span = (
+            f"{d['worst_window_start_year']}-{d['worst_window_end_year']}"
+            if d.get("worst_window_start_year") is not None and d.get("worst_window_end_year") is not None
+            else "n/d"
+        )
+        best_span = (
+            f"{d['best_window_start_year']}-{d['best_window_end_year']}"
+            if d.get("best_window_start_year") is not None and d.get("best_window_end_year") is not None
+            else "n/d"
+        )
+        fig.add_annotation(
+            xref="paper",
+            yref="paper",
+            x=0.01,
+            y=0.99,
+            align="left",
+            showarrow=False,
+            bordercolor="rgba(52, 73, 94, 0.35)",
+            borderwidth=1,
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            text=(
+                f"<b>Backtesting crítico</b><br>"
+                f"Peor ventana: {worst_span} → €{float(d.get('worst_final_real', 0.0)):,.0f} reales<br>"
+                f"Mejor ventana: {best_span} → €{float(d.get('best_final_real', 0.0)):,.0f} reales"
+            ),
+        )
+
     model_key = (
         simulation_results.get("model_name", params.get("simulation_model", "model"))
         .lower()
@@ -2250,6 +3110,66 @@ def render_main_chart(simulation_results: Dict, params: Dict) -> None:
         .replace(")", "")
     )
     render_plotly_chart(fig, key=f"main_chart_{model_key}")
+
+    if is_backtest and simulation_results.get("backtest_diagnostics"):
+        d = simulation_results["backtest_diagnostics"]
+        windows_count = int(d.get("windows_count", 0))
+        data_start = d.get("data_start_year")
+        data_end = d.get("data_end_year")
+        months_min = d.get("min_months_observed")
+        months_avg = d.get("avg_months_observed")
+        st.caption(
+            "Indicadores de fidelidad del backtesting: "
+            f"ventanas evaluadas={windows_count}, "
+            f"histórico={data_start}-{data_end}, "
+            f"calidad de cobertura mensual min/prom={months_min if months_min is not None else 'n/d'}/{(f'{months_avg:.1f}' if months_avg is not None else 'n/d')}."
+        )
+        st.caption(
+            "Lectura de puntos críticos: la línea roja muestra una secuencia histórica adversa (riesgo de secuencia en acumulación/FIRE) "
+            "y la verde una secuencia favorable. La diferencia entre ambas acota la sensibilidad histórica del plan."
+        )
+
+        worst_real = float(d.get("worst_final_real", 0.0))
+        best_real = float(d.get("best_final_real", 0.0))
+        seq_spread_real = best_real - worst_real
+        worst_path_real = simulation_results.get("worst_path_real")
+        best_path_real = simulation_results.get("best_path_real")
+        worst_years_to_fire = (
+            find_years_to_fire(np.array(worst_path_real, dtype=float), fire_target)
+            if worst_path_real is not None
+            else None
+        )
+        best_years_to_fire = (
+            find_years_to_fire(np.array(best_path_real, dtype=float), fire_target)
+            if best_path_real is not None
+            else None
+        )
+        if worst_years_to_fire is not None and best_years_to_fire is not None:
+            timeline_gap_text = f"{(worst_years_to_fire - best_years_to_fire):+d} años (crítica vs favorable)"
+        elif worst_years_to_fire is None and best_years_to_fire is not None:
+            timeline_gap_text = "Crítica: no alcanza FIRE"
+        elif worst_years_to_fire is not None and best_years_to_fire is None:
+            timeline_gap_text = "Favorable: no alcanza FIRE"
+        else:
+            timeline_gap_text = "Ninguna ventana alcanza FIRE"
+
+        seq_col1, seq_col2, seq_col3 = st.columns(3)
+        seq_col1.metric(
+            "🧨 Riesgo de secuencia (brecha final real)",
+            f"€{seq_spread_real:,.0f}",
+            delta="Mejor ventana - peor ventana",
+            delta_color="off",
+        )
+        seq_col2.metric(
+            "⏱️ FIRE en ventana crítica",
+            f"{worst_years_to_fire} años" if worst_years_to_fire is not None else "No alcanzable",
+        )
+        seq_col3.metric(
+            "⚡ FIRE en ventana favorable",
+            f"{best_years_to_fire} años" if best_years_to_fire is not None else "No alcanzable",
+            delta=timeline_gap_text,
+            delta_color="off",
+        )
     if params.get("modo_guiado", False):
         st.caption(
             "Lectura rápida: línea azul = escenario central. Banda ancha = incertidumbre. "
@@ -2498,16 +3418,109 @@ def render_sensitivity_analysis(params: Dict) -> None:
 
 
 # =====================================================================
-# 9. EXPORT FUNCTIONALITY
+# 9. ACCUMULATION + EXPORT FUNCTIONALITY
 # =====================================================================
+
+def render_accumulation_box(simulation_results: Dict, params: Dict) -> None:
+    """Render accumulation table and summary cards (pre-FIRE phase)."""
+    st.subheader("📈 Acumulación de capital (antes de FIRE)")
+    st.caption("Evolución anual durante la fase de acumulación en escenarios P5/P25/P50/P75/P95.")
+
+    total_points = len(simulation_results["percentile_50"])
+    if total_points <= 1:
+        st.info("No hay horizonte suficiente para mostrar acumulación anual.")
+        return
+
+    # Show year 0 as initial state; table starts at year 1 to align with yearly contribution flow.
+    initial_nominal = float(simulation_results["percentile_50"][0])
+    initial_real = float(simulation_results["real_percentile_50"][0])
+    st.caption(
+        f"Año 0 (inicio): P50 nominal €{initial_nominal:,.0f} | P50 real €{initial_real:,.0f}."
+    )
+
+    years = np.arange(1, total_points)
+    ages = params["edad_actual"] + years
+    g = float(params.get("contribution_growth_rate", 0.0))
+    annual_contrib = np.array(
+        [
+            float(params.get("aportacion_mensual_efectiva", params["aportacion_mensual"])) * 12 * ((1 + g) ** (y - 1))
+            for y in years
+        ]
+    )
+    cumulative_contrib = np.cumsum(annual_contrib)
+
+    accumulation_df = pd.DataFrame(
+        {
+            "Año": years,
+            "Edad": ages,
+            "Aportación anual efectiva (€)": annual_contrib,
+            "Aportación acumulada (€)": cumulative_contrib,
+            "P5 nominal (€)": simulation_results["percentile_5"][1:],
+            "P25 nominal (€)": simulation_results["percentile_25"][1:],
+            "P50 nominal (€)": simulation_results["percentile_50"][1:],
+            "P75 nominal (€)": simulation_results["percentile_75"][1:],
+            "P95 nominal (€)": simulation_results["percentile_95"][1:],
+            "P5 real (€ hoy)": simulation_results["real_percentile_5"][1:],
+            "P25 real (€ hoy)": simulation_results["real_percentile_25"][1:],
+            "P50 real (€ hoy)": simulation_results["real_percentile_50"][1:],
+            "P75 real (€ hoy)": simulation_results["real_percentile_75"][1:],
+            "P95 real (€ hoy)": simulation_results["real_percentile_95"][1:],
+        }
+    )
+    st.dataframe(
+        accumulation_df.style.format(
+            {
+                "Aportación anual efectiva (€)": "€{:,.0f}",
+                "Aportación acumulada (€)": "€{:,.0f}",
+                "P5 nominal (€)": "€{:,.0f}",
+                "P25 nominal (€)": "€{:,.0f}",
+                "P50 nominal (€)": "€{:,.0f}",
+                "P75 nominal (€)": "€{:,.0f}",
+                "P95 nominal (€)": "€{:,.0f}",
+                "P5 real (€ hoy)": "€{:,.0f}",
+                "P25 real (€ hoy)": "€{:,.0f}",
+                "P50 real (€ hoy)": "€{:,.0f}",
+                "P75 real (€ hoy)": "€{:,.0f}",
+                "P95 real (€ hoy)": "€{:,.0f}",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    fire_target = get_display_fire_target(simulation_results, params)
+    years_to_fire_by_percentile = {
+        "P5": find_years_to_fire(simulation_results["real_percentile_5"], fire_target),
+        "P25": find_years_to_fire(simulation_results["real_percentile_25"], fire_target),
+        "P50": find_years_to_fire(simulation_results["real_percentile_50"], fire_target),
+        "P75": find_years_to_fire(simulation_results["real_percentile_75"], fire_target),
+        "P95": find_years_to_fire(simulation_results["real_percentile_95"], fire_target),
+    }
+
+    summary_cols = st.columns(5)
+    for col, label in zip(summary_cols, ["P5", "P25", "P50", "P75", "P95"]):
+        years_value = years_to_fire_by_percentile[label]
+        delta_label = f"{years_value} años hasta FIRE" if years_value is not None else "No alcanza FIRE"
+        col.metric(
+            f"{label} capital final",
+            f"€{float(accumulation_df[f'{label} nominal (€)'].iloc[-1]):,.0f}",
+            delta=delta_label,
+            delta_color="normal" if years_value is not None else "off",
+        )
+
+    st.caption(
+        f"Aportación acumulada total en horizonte: €{annual_contrib.sum():,.0f}. "
+        "Años a FIRE se evalúan en euros reales (poder adquisitivo de hoy)."
+    )
+
 
 def render_export_options(simulation_results: Dict, params: Dict) -> None:
     """
-    Export CSV (full time series) and PDF (executive summary), and support options.
+    Export CSV/JSON and browser print-to-PDF.
     """
     st.subheader("📥 Exportar Resultados")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         # CSV Export
@@ -2535,27 +3548,62 @@ def render_export_options(simulation_results: Dict, params: Dict) -> None:
             data=csv_buffer,
             file_name=f"fire_projection_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
+            width="stretch",
         )
 
     with col2:
-        # PDF Export placeholder with friendly message
-        col_pdf, col_coffee = st.columns([2, 1])
-        
-        with col_pdf:
-            st.info(
-                "📄 **Generar PDF:** Reporte ejecutivo (1 página) con KPIs, gráfico principal y "
-                "recomendaciones. Beta en desarrollo."
-            )
-        
-        with col_coffee:
-            st.markdown(
-                "<a href='https://buymeacoffee.com/pishu' target='_blank' style='display: inline-block; padding: 10px 20px; "
-                "background-color: #FFDD00; color: #222; text-decoration: none; border-radius: 5px; font-weight: bold;'>"
-                "☕ Apóyame"
-                "</a>",
-                unsafe_allow_html=True
-            )
-    
+        profile_payload = serialize_profile(params)
+        st.download_button(
+            label="💾 Descargar perfil (JSON)",
+            data=json.dumps(profile_payload, ensure_ascii=False, indent=2),
+            file_name=f"fire_profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            width="stretch",
+        )
+        scenario_payload = {
+            "meta": {
+                "generated_at": datetime.now().isoformat(),
+                "model": simulation_results.get("model_name", params.get("simulation_model", "n/d")),
+                "fiscal_mode": params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK),
+            },
+            "params": serialize_profile(params),
+            "summary": {
+                "success_rate_final": float(simulation_results.get("success_rate_final", 0.0)),
+                "final_median_nominal": float(simulation_results.get("final_median", 0.0)),
+                "final_median_real": float(simulation_results.get("final_median_real", 0.0)),
+                "fire_target_display": float(fire_target),
+            },
+        }
+        st.download_button(
+            label="🧩 Descargar JSON (escenario)",
+            data=json.dumps(scenario_payload, ensure_ascii=False, indent=2),
+            file_name=f"fire_scenario_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            width="stretch",
+        )
+
+    with col3:
+        if "print_nonce" not in st.session_state:
+            st.session_state["print_nonce"] = 0
+        if "print_nonce_rendered" not in st.session_state:
+            st.session_state["print_nonce_rendered"] = -1
+        if st.button(
+            "🖨️ Imprimir / Guardar PDF",
+            key="print_page_button",
+            width="stretch",
+            help="Abre el diálogo nativo del navegador para imprimir o guardar como PDF.",
+        ):
+            st.session_state["print_nonce"] += 1
+        if st.session_state["print_nonce"] != st.session_state["print_nonce_rendered"]:
+            nonce = st.session_state["print_nonce"]
+            if nonce > 0:
+                components.html(
+                    f"<div id='print-trigger-{nonce}'></div><script>setTimeout(() => window.print(), 0);</script>",
+                    height=0,
+                )
+                st.session_state["print_nonce_rendered"] = nonce
+        st.caption("Usa la impresora PDF del navegador para generar el informe en un clic.")
+
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #666; font-size: 14px;'>"
@@ -2575,6 +3623,25 @@ def render_export_options(simulation_results: Dict, params: Dict) -> None:
 
 def main():
     """Main application flow"""
+
+    if "sidebar_visible" not in st.session_state:
+        st.session_state["sidebar_visible"] = True
+
+    top_left, _top_right = st.columns([1, 5])
+    with top_left:
+        toggle_label = "Ocultar panel" if st.session_state["sidebar_visible"] else "Mostrar panel"
+        if st.button(toggle_label, key="toggle_sidebar_visibility", width="stretch"):
+            st.session_state["sidebar_visible"] = not st.session_state["sidebar_visible"]
+
+    if not st.session_state["sidebar_visible"]:
+        st.markdown(
+            """
+            <style>
+            section[data-testid="stSidebar"] {display: none !important;}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # Header
     st.title("📈 Calculadora FIRE - Calculadora de Independencia Financiera")
@@ -2598,30 +3665,46 @@ def main():
 
     # 1. RENDER SIDEBAR (Input Collection)
     params = render_sidebar()
-    renta_bruta_anual = (
-        params.get("renta_bruta_alquiler_anual", 0.0)
-        if params.get("incluir_rentas_alquiler_en_simulacion", True)
-        else 0.0
-    )
     ahorro_vivienda_anual = (
         params.get("ahorro_vivienda_habitual_anual", 0.0)
         if params.get("aplicar_ajuste_vivienda_habitual", False)
         else 0.0
     )
-    aportacion_mensual_efectiva = params["aportacion_mensual"] + (renta_bruta_anual / 12.0)
-    gasto_anual_neto_cartera = max(
-        0.0,
-        params["gastos_anuales"] - renta_bruta_anual - ahorro_vivienda_anual,
+    housing_flows = compute_effective_housing_and_rental_flows(
+        base_monthly_contribution=params["aportacion_mensual"],
+        annual_spending=params["gastos_anuales"],
+        age_current=params["edad_actual"],
+        age_target=params["edad_objetivo"],
+        rental_annual_gross=params.get("renta_bruta_alquiler_anual", 0.0),
+        include_rental_in_simulation=params.get("incluir_rentas_alquiler_en_simulacion", True),
+        use_advanced_rental_model=params.get("usar_modelo_avanzado_alquiler", False),
+        rental_costs_vacancy_pct=params.get("alquiler_costes_vacancia_pct", 0.0),
+        rental_effective_irpf_pct=params.get("alquiler_irpf_efectivo_pct", 0.0),
+        annual_primary_home_savings=ahorro_vivienda_anual,
+        include_primary_mortgage_payment=params.get("incluir_cuota_vivienda_en_simulacion", False),
+        primary_mortgage_monthly_payment=params.get("cuota_hipoteca_vivienda_mensual", 0.0),
+        primary_mortgage_months_remaining=params.get("meses_hipoteca_vivienda_restantes", 0),
+        include_investment_mortgage_payment=params.get("incluir_cuota_inmuebles_en_simulacion", False),
+        investment_mortgage_monthly_payment=params.get("cuota_hipoteca_inmuebles_mensual", 0.0),
+        investment_mortgage_months_remaining=params.get("meses_hipoteca_inmuebles_restantes", 0),
     )
-    params["renta_bruta_alquiler_anual_efectiva"] = renta_bruta_anual
+
+    params["renta_bruta_alquiler_anual_efectiva"] = housing_flows["rental_gross_effective"]
+    params["renta_neta_alquiler_anual_efectiva"] = housing_flows["rental_net_effective"]
+    params["cuota_total_hipotecas_mensual_efectiva"] = housing_flows["mortgages_monthly_total"]
+    params["cuota_post_fire_hipotecas_mensual_efectiva"] = housing_flows["mortgages_monthly_post_fire"]
+    params["months_after_fire_vivienda"] = housing_flows["months_after_fire_primary"]
+    params["months_after_fire_inmuebles"] = housing_flows["months_after_fire_investment"]
     params["ahorro_vivienda_habitual_anual_efectivo"] = ahorro_vivienda_anual
-    params["aportacion_mensual_efectiva"] = aportacion_mensual_efectiva
-    params["gasto_anual_neto_cartera"] = gasto_anual_neto_cartera
+    params["aportacion_mensual_efectiva"] = housing_flows["monthly_contribution_effective"]
+    params["gasto_anual_neto_cartera"] = housing_flows["annual_spending_effective"]
 
     render_active_context_summary(params)
     tax_drag = get_fiscal_return_adjustment(
         params["regimen_fiscal"],
         params["include_optimización"],
+        params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK),
+        params.get("intl_tax_rates"),
     )
     mean_return_for_sim = params["rentabilidad_esperada"] - tax_drag
     params["rentabilidad_neta_simulacion"] = mean_return_for_sim
@@ -2683,28 +3766,40 @@ def main():
         }
 
         tax_pack_for_run = None
-        if params.get("tax_year") is not None and params.get("region"):
+        if (
+            params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK) == FISCAL_MODE_ES_TAXPACK
+            and params.get("tax_year") is not None
+            and params.get("region")
+        ):
             try:
                 tax_pack_for_run = load_tax_pack(int(params["tax_year"]), "es")
             except Exception:
                 tax_pack_for_run = None
 
         if params.get("fiscal_priority") == "Jubilación":
-            retirement_ctx = estimate_retirement_tax_context(
-                net_spending=gasto_anual_neto_cartera,
-                safe_withdrawal_rate=params["safe_withdrawal_rate"],
-                taxable_withdrawal_ratio=params.get("taxable_withdrawal_ratio_effective", 0.4),
-                tax_pack=tax_pack_for_run,
-                region=params.get("region"),
-            )
+            if params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK) == FISCAL_MODE_INTL_BASIC:
+                retirement_ctx = estimate_retirement_tax_context_intl_basic(
+                    net_spending=params.get("gasto_anual_neto_cartera", params["gastos_anuales"]),
+                    safe_withdrawal_rate=params["safe_withdrawal_rate"],
+                    taxable_withdrawal_ratio=params.get("taxable_withdrawal_ratio_effective", 0.4),
+                    intl_tax_rates=params.get("intl_tax_rates", {}),
+                )
+            else:
+                retirement_ctx = estimate_retirement_tax_context(
+                    net_spending=params.get("gasto_anual_neto_cartera", params["gastos_anuales"]),
+                    safe_withdrawal_rate=params["safe_withdrawal_rate"],
+                    taxable_withdrawal_ratio=params.get("taxable_withdrawal_ratio_effective", 0.4),
+                    tax_pack=tax_pack_for_run,
+                    region=params.get("region"),
+                )
             params["retirement_tax_context"] = retirement_ctx
             annual_spending_for_target = retirement_ctx["gross_withdrawal_required"]
             params["fire_target_effective"] = retirement_ctx["target_portfolio_gross"]
             tax_pack_accumulation = None
         else:
             params["retirement_tax_context"] = None
-            annual_spending_for_target = gasto_anual_neto_cartera
-            params["fire_target_effective"] = gasto_anual_neto_cartera / params["safe_withdrawal_rate"]
+            annual_spending_for_target = params.get("gasto_anual_neto_cartera", params["gastos_anuales"])
+            params["fire_target_effective"] = annual_spending_for_target / params["safe_withdrawal_rate"]
             tax_pack_accumulation = tax_pack_for_run
 
         params["annual_spending_for_target"] = annual_spending_for_target
@@ -2721,11 +3816,13 @@ def main():
 
             params_key = (
                 f"{params['patrimonio_inicial']}_{params.get('patrimonio_base_simulacion')}_{params['aportacion_mensual']}_"
-                f"{params.get('aportacion_mensual_efectiva')}_{params.get('renta_bruta_alquiler_anual_efectiva')}_"
+                f"{params.get('aportacion_mensual_efectiva')}_{params.get('renta_neta_alquiler_anual_efectiva')}_"
+                f"{params.get('cuota_total_hipotecas_mensual_efectiva')}_{params.get('cuota_post_fire_hipotecas_mensual_efectiva')}_"
                 f"{params.get('ahorro_vivienda_habitual_anual_efectivo')}_"
                 f"{params['rentabilidad_esperada']}_{params['volatilidad']}_{params['inflacion']}_"
                 f"{params.get('contribution_growth_rate')}_"
                 f"{params['gastos_anuales']}_{params.get('gasto_anual_neto_cartera')}_{params['regimen_fiscal']}_{params['include_optimización']}_"
+                f"{params.get('fiscal_mode')}_{params.get('intl_tax_rates')}_"
                 f"{params['safe_withdrawal_rate']}_{params.get('fiscal_priority')}_{params.get('taxable_withdrawal_ratio_effective')}_"
                 f"{model_type}_{historical_strategy}_{params.get('tax_year')}_{params.get('region')}"
             )
@@ -2773,11 +3870,13 @@ def main():
                     model_type = "bootstrap" if label == "Monte Carlo (Bootstrap histórico)" else "backtest"
                     params_key = (
                         f"{params['patrimonio_inicial']}_{params.get('patrimonio_base_simulacion')}_{params['aportacion_mensual']}_"
-                        f"{params.get('aportacion_mensual_efectiva')}_{params.get('renta_bruta_alquiler_anual_efectiva')}_"
+                        f"{params.get('aportacion_mensual_efectiva')}_{params.get('renta_neta_alquiler_anual_efectiva')}_"
+                        f"{params.get('cuota_total_hipotecas_mensual_efectiva')}_{params.get('cuota_post_fire_hipotecas_mensual_efectiva')}_"
                         f"{params.get('ahorro_vivienda_habitual_anual_efectivo')}_"
                         f"{params['rentabilidad_esperada']}_{params['volatilidad']}_{params['inflacion']}_"
                         f"{params.get('contribution_growth_rate')}_"
                         f"{params['gastos_anuales']}_{params.get('gasto_anual_neto_cartera')}_{params['regimen_fiscal']}_{params['include_optimización']}_"
+                        f"{params.get('fiscal_mode')}_{params.get('intl_tax_rates')}_"
                         f"{params['safe_withdrawal_rate']}_{params.get('fiscal_priority')}_{params.get('taxable_withdrawal_ratio_effective')}_"
                         f"{model_type}_{chosen_strategy}_{params.get('tax_year')}_{params.get('region')}"
                     )
@@ -2805,7 +3904,10 @@ def main():
                         "- **Histórico (100% renta variable):** usa retorno anual observado de S&P 500 total return (EE. UU.) desde 1871.\n"
                         "- **Sintético (carteras mixtas):** combina cada año histórico de renta variable con renta fija sintética al 3% anual.\n"
                         "- **Fórmula de composición:** `retorno_cartera = w_rv * retorno_rv_histórico + w_rf * 0.03`.\n"
-                        "- En años con menos de 12 observaciones mensuales, el retorno anual se anualiza de forma aproximada."
+                        "- En años con menos de 12 observaciones mensuales, el retorno anual se anualiza de forma aproximada.\n"
+                        "- **Fidelidad del backtesting:** es alta para estudiar secuencia de mercado histórica anual, "
+                        "pero no replica fricción real completa (comisiones, deslizamientos, ejecución intra-año, divisa, "
+                        "impuestos exactos por activo). Usa los indicadores de ventana crítica para acotar riesgo."
                     )
             params["simulation_model"] = label
             params["historical_strategy_label"] = simulation_results_by_model[label].get("historical_strategy_label")
@@ -2831,31 +3933,28 @@ def main():
 
     st.divider()
 
-    # 6. RENDER RETIREMENT DECUMULATION BOX
+    # 6. RENDER ACCUMULATION BOX
+    render_accumulation_box(simulation_results, params)
+
+    st.divider()
+
+    # 7. RENDER RETIREMENT DECUMULATION BOX
     render_decumulation_box(simulation_results, params)
 
     st.divider()
 
-    # 7. RENDER EXPORT (BASE MODEL)
+    # 8. RENDER EXPORT (BASE MODEL)
     render_export_options(simulation_results, params)
 
     st.divider()
     
-    # 8. FINAL INSPIRATIONAL MESSAGE
-    fire_target = get_display_fire_target(simulation_results, params)
-    years_to_fire = find_years_to_fire(simulation_results["real_percentile_50"], fire_target)
-    
-    final_emoji, final_msg = generate_fire_readiness_message(years_to_fire, params["edad_objetivo"] - params["edad_actual"])
+    # 9. FINAL NARRATIVE SUMMARY
+    render_final_narrative_summary(simulation_results, params)
 
-    final_banner = st.success if years_to_fire is not None else st.warning
-    final_banner(
-        f"{final_emoji} **Resumen final de tu plan FIRE**\n\n{final_msg}\n\n"
-        f"**Próximos pasos:**\n"
-        f"1. Descarga tu proyección (CSV) para seguimiento anual\n"
-        f"2. Revisa la matriz de sensibilidad cada trimestre\n"
-        f"3. Ajusta tus aportaciones si tu situación financiera cambia\n"
-        f"4. Consulta con un asesor para optimización fiscal"
-    )
+    st.divider()
+
+    # 10. A/B COMPARATOR (BASE MODEL)
+    render_ab_comparator(simulation_results, params)
 
     # Footer
     st.divider()

@@ -44,6 +44,8 @@ Gracias por todo el feedback del hilo. Esta ronda ha sido de **precisión de cá
 
 * Orden de columnas fijado para evitar desajustes visuales.
 * Chequeo contable por fila (`capital inicial + crecimiento - retirada = capital final`).
+* Nuevo modelo de retiro por defecto: **2 fases simple** (retirada neta desde cartera en pre/post pensión).
+* El modo avanzado con desglose (`pensión pública`, `plan privado`, `otras rentas`) se mantiene como opción.
 * Mini-KPI por pestaña con retorno implícito usado.
 * Correcciones de coherencia en escenarios P5/P25/P50/P75/P95.
 * KPI de jubilación ahora sí responde al slider de años proyectados.

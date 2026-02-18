@@ -23,6 +23,7 @@ import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from typing import Dict, Tuple, List, Optional, Any
 import inspect
 from datetime import datetime
@@ -57,6 +58,7 @@ from src.retirement_models import (
     estimate_retirement_tax_context as estimate_retirement_tax_context_core,
     estimate_auto_taxable_withdrawal_ratio as estimate_auto_taxable_withdrawal_ratio_core,
     build_decumulation_table_two_stage_schedule as build_decumulation_table_two_stage_schedule_core,
+    build_decumulation_table_two_phase_net_withdrawal as build_decumulation_table_two_phase_net_withdrawal_core,
 )
 from src.profile_io import serialize_profile, deserialize_profile
 from src.fiscal_modes import (
@@ -617,7 +619,12 @@ def validate_inputs(params: Dict) -> Tuple[bool, List[str]]:
         errors.append(f"❌ Aportación mensual máxima: {fmt_eur(max_monthly)}")
 
     pension_start_age = params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67))
-    if params.get("two_stage_retirement_model") and pension_start_age < params["edad_objetivo"]:
+    if params.get("retirement_model_mode") == "SIMPLE_TWO_PHASE":
+        pension_start_age = params.get("two_phase_switch_age", pension_start_age)
+    if (
+        params.get("retirement_model_mode") == "SIMPLE_TWO_PHASE"
+        or params.get("two_stage_retirement_model")
+    ) and pension_start_age < params["edad_objetivo"]:
         warnings.append(
             "⚠️  Edad de inicio de pensión menor que edad objetivo FIRE. El tramo pre-pensión quedará en 0 años."
         )
@@ -701,12 +708,19 @@ def render_active_context_summary(params: Dict) -> None:
         if params.get("usar_capital_invertible_ampliado")
         else "solo cartera líquida"
     )
-    fiscal_focus = "jubilación" if params.get("fiscal_priority") == "Jubilación" else "acumulación"
-    fiscal_sentence = (
-        "El objetivo FIRE se ajusta para aproximar impuestos durante la retirada de capital."
-        if fiscal_focus == "jubilación"
-        else "La simulación prioriza la fiscalidad durante los años previos a FIRE."
-    )
+    fiscal_priority = params.get("fiscal_priority")
+    if fiscal_priority == "Jubilación":
+        fiscal_focus = "jubilación"
+        fiscal_sentence = "El objetivo FIRE se ajusta para aproximar impuestos durante la retirada de capital."
+    elif fiscal_priority == "Mixta (acumulación + jubilación)":
+        fiscal_focus = "acumulación y jubilación"
+        fiscal_sentence = (
+            "Se aplican ajustes fiscales en acumulación (drag sobre crecimiento) y también en retiradas "
+            "(objetivo FIRE bruto en jubilación)."
+        )
+    else:
+        fiscal_focus = "acumulación"
+        fiscal_sentence = "La simulación prioriza la fiscalidad durante los años previos a FIRE."
     renta_efectiva = params.get("renta_neta_alquiler_anual_efectiva", 0.0)
     renta_bruta_base = params.get("renta_bruta_alquiler_anual_efectiva", 0.0)
     cuota_hipotecas_mensual = params.get("cuota_total_hipotecas_mensual_efectiva", 0.0)
@@ -918,14 +932,13 @@ def build_ab_summary(simulation_results: Dict, params: Dict, model_label: str) -
 def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: Dict) -> None:
     """Render A/B comparator: baseline scenario A vs current scenario B."""
     st.markdown("### 🆚 Comparador A/B (escenario guardado vs actual)")
-    st.markdown(
-        "<div class='ab-compare-shell'>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<div class='ab-compare-title'>Compara rápidamente tu escenario actual (B) contra una línea base guardada (A).</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("Compara un escenario base guardado (**A**) contra tu escenario actual (**B**).")
+    with st.expander("Cómo usar este comparador", expanded=False):
+        st.markdown(
+            "1. Pulsa **Guardar escenario actual como base (A)**.\n"
+            "2. Cambia parámetros o método para crear el escenario **B**.\n"
+            "3. Revisa deltas y lectura rápida para decidir si B mejora A."
+        )
 
     model_options = list(simulation_results_by_model.keys())
 
@@ -941,6 +954,7 @@ def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: D
         if isinstance(baseline_summary, dict)
         else "Monte Carlo (Normal)"
     )
+    has_baseline = isinstance(baseline_summary, dict)
 
     lock_to_baseline_model = st.checkbox(
         "Bloquear modelo B al modelo guardado en A",
@@ -950,6 +964,7 @@ def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: D
             "Si está activo, B usa el mismo método de simulación que A. "
             "Útil para comparar solo cambios de parámetros."
         ),
+        disabled=not has_baseline,
     )
 
     default_b_model = st.session_state.get("ab_current_model", "Monte Carlo (Normal)")
@@ -959,7 +974,7 @@ def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: D
         default_b_model = model_options[0]
 
     selected_b_model = st.selectbox(
-        "Modelo para escenario B (actual)",
+        "Método para escenario B (actual)",
         options=model_options,
         index=model_options.index(default_b_model),
         key="ab_current_model",
@@ -970,7 +985,7 @@ def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: D
 
     controls_col1, controls_col2 = st.columns(2)
     with controls_col1:
-        if st.button("Guardar escenario actual como A", key="ab_save_baseline", width="stretch"):
+        if st.button("Guardar escenario actual como base (A)", key="ab_save_baseline", width="stretch"):
             st.session_state["ab_baseline_params"] = serialize_profile(params)
             st.session_state["ab_baseline_summary"] = build_ab_summary(
                 current_results,
@@ -984,7 +999,7 @@ def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: D
             st.success("Escenario A guardado para comparación.")
             st.rerun()
     with controls_col2:
-        if st.button("Limpiar comparación", key="ab_clear_baseline", width="stretch"):
+        if st.button("Limpiar base A", key="ab_clear_baseline", width="stretch"):
             st.session_state.pop("ab_baseline_params", None)
             st.session_state.pop("ab_baseline_summary", None)
             st.session_state.pop("ab_baseline_created_at", None)
@@ -995,7 +1010,7 @@ def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: D
     baseline_summary = st.session_state.get("ab_baseline_summary")
     baseline_payload = st.session_state.get("ab_baseline_params", {})
     if not baseline_summary:
-        st.info("Aún no hay escenario A. Guarda uno para activar la comparación.")
+        st.info("Aún no hay escenario base A. Guarda el estado actual para activar la comparación.")
         preview_cols = st.columns(4)
         preview_horizon = int(current_summary["years_horizon"])
         preview_years = current_summary.get("years_to_fire")
@@ -1014,7 +1029,6 @@ def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: D
             "Estos indicadores corresponden al modelo B seleccionado. "
             "Guarda el escenario como A para ver deltas y lectura comparativa."
         )
-        st.markdown("</div>", unsafe_allow_html=True)
         return
 
     current_payload = serialize_profile(params)
@@ -1310,7 +1324,7 @@ def render_ab_comparator(simulation_results_by_model: Dict[str, Dict], params: D
             "Si quieres comparar impacto real en la trayectoria, cambia variables de acumulación "
             "(patrimonio inicial, aportación, horizonte, rentabilidad, inflación o volatilidad)."
         )
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.caption("Tip: para comparar métodos con el mismo perfil, guarda A y cambia solo el método de B.")
 
 
 def estimate_retirement_tax_context(
@@ -1406,7 +1420,7 @@ def estimate_auto_taxable_withdrawal_ratio(
 
 def get_display_fire_target(simulation_results: Dict, params: Dict) -> float:
     """Use a single FIRE target source for UI consistency."""
-    if params.get("fiscal_priority") == "Jubilación":
+    if params.get("fiscal_priority") in ("Jubilación", "Mixta (acumulación + jubilación)"):
         ctx = params.get("retirement_tax_context")
         if ctx and ctx.get("target_portfolio_gross") is not None:
             return float(ctx["target_portfolio_gross"])
@@ -1421,13 +1435,18 @@ def get_display_fire_target(simulation_results: Dict, params: Dict) -> float:
 def render_retirement_tax_focus_summary(params: Dict) -> None:
     """Explain retirement-tax-focused target adjustments."""
     ctx = params.get("retirement_tax_context")
-    if not ctx or params.get("fiscal_priority") != "Jubilación":
+    if not ctx or params.get("fiscal_priority") not in ("Jubilación", "Mixta (acumulación + jubilación)"):
         return
 
     st.subheader("🎯 Objetivo fiscal en jubilación")
-    st.caption(
-        "Este bloque prioriza impuestos durante la jubilación (retiros), no la acumulación previa."
-    )
+    if params.get("fiscal_priority") == "Mixta (acumulación + jubilación)":
+        st.caption(
+            "Este bloque muestra el ajuste fiscal de retiradas; además, en modo mixto también se aplica fiscalidad en acumulación."
+        )
+    else:
+        st.caption(
+            "Este bloque prioriza impuestos durante la jubilación (retiros), no la acumulación previa."
+        )
     net_spending_for_portfolio = params.get("gasto_anual_neto_cartera", params["gastos_anuales"])
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Gasto neto deseado", f"{fmt_eur(net_spending_for_portfolio)}")
@@ -1515,6 +1534,167 @@ def build_decumulation_table(
             }
         )
 
+        portfolio = capital_final
+        inflation_factor *= (1 + inflation_rate)
+
+    return pd.DataFrame(rows)
+
+
+def build_decumulation_table_with_return_path(
+    starting_portfolio: float,
+    annual_withdrawal_base: float,
+    annual_returns_sequence: np.ndarray,
+    inflation_rate: float,
+    tax_rate_on_gains: float,
+    annual_mortgage_schedule: Optional[List[float]] = None,
+    pending_installments_end_schedule: Optional[List[int]] = None,
+    property_sale_enabled: bool = False,
+    property_sale_year: int = 0,
+    property_sale_amount: float = 0.0,
+    annual_extra_withdrawal_schedule: Optional[List[float]] = None,
+) -> pd.DataFrame:
+    """Decumulation table using a full annual return path (sequential backtesting)."""
+    rows: List[Dict[str, float]] = []
+    portfolio = float(max(0.0, starting_portfolio))
+    inflation_factor = 1.0
+    years_in_retirement = int(len(annual_returns_sequence))
+
+    for year in range(1, years_in_retirement + 1):
+        annual_return = float(annual_returns_sequence[year - 1])
+        sale_nominal = (
+            max(0.0, float(property_sale_amount)) * inflation_factor
+            if property_sale_enabled and int(property_sale_year) == year
+            else 0.0
+        )
+        capital_inicial = portfolio + sale_nominal
+        annual_mortgage_cost = 0.0
+        if annual_mortgage_schedule and year - 1 < len(annual_mortgage_schedule):
+            annual_mortgage_cost = max(0.0, float(annual_mortgage_schedule[year - 1]))
+        annual_extra_withdrawal = 0.0
+        if annual_extra_withdrawal_schedule and year - 1 < len(annual_extra_withdrawal_schedule):
+            annual_extra_withdrawal = max(0.0, float(annual_extra_withdrawal_schedule[year - 1]))
+        pending_installments_end_year = 0
+        if pending_installments_end_schedule and year - 1 < len(pending_installments_end_schedule):
+            pending_installments_end_year = max(0, int(pending_installments_end_schedule[year - 1]))
+
+        retirada = (annual_withdrawal_base * inflation_factor) + annual_mortgage_cost + annual_extra_withdrawal
+        growth_gross = capital_inicial * annual_return
+        tax_growth = max(0.0, growth_gross) * max(0.0, tax_rate_on_gains)
+        growth_net = growth_gross - tax_growth
+        capital_final = max(0.0, capital_inicial + growth_net - retirada)
+
+        rows.append(
+            {
+                "Año jubilación": year,
+                "Necesidad base cartera (€)": annual_withdrawal_base * inflation_factor,
+                "Ingresos totales (€)": 0.0,
+                "Ajuste venta/alquiler (€)": annual_extra_withdrawal,
+                "Capital inicial (€)": capital_inicial,
+                "Venta inmueble (€)": sale_nominal,
+                "Cuota hipoteca pendiente (€)": annual_mortgage_cost,
+                "Cuotas pendientes fin año": pending_installments_end_year,
+                "Retirada anual (€)": retirada,
+                "Crecimiento neto (€)": growth_net,
+                "Capital final (€)": capital_final,
+                "Capital agotado": capital_final <= 0,
+            }
+        )
+        portfolio = capital_final
+        inflation_factor *= (1 + inflation_rate)
+
+    return pd.DataFrame(rows)
+
+
+def build_decumulation_table_two_stage_schedule_with_return_path(
+    starting_portfolio: float,
+    fire_age: int,
+    annual_spending_base: float,
+    pension_public_start_age: int,
+    pension_public_net_annual: float,
+    plan_private_start_age: int,
+    plan_private_duration_years: int,
+    plan_private_net_annual: float,
+    other_income_post_pension_annual: float,
+    pre_pension_extra_cost_annual: float,
+    annual_returns_sequence: np.ndarray,
+    inflation_rate: float,
+    tax_rate_on_gains: float,
+    annual_mortgage_schedule: Optional[List[float]] = None,
+    pending_installments_end_schedule: Optional[List[int]] = None,
+    property_sale_enabled: bool = False,
+    property_sale_year: int = 0,
+    property_sale_amount: float = 0.0,
+    annual_extra_withdrawal_schedule: Optional[List[float]] = None,
+) -> pd.DataFrame:
+    """Two-stage decumulation table using yearly return path (sequential backtesting)."""
+    rows: List[Dict[str, float]] = []
+    portfolio = float(max(0.0, starting_portfolio))
+    inflation_factor = 1.0
+    years_in_retirement = int(len(annual_returns_sequence))
+    plan_private_end_age = plan_private_start_age + max(0, plan_private_duration_years) - 1
+
+    for year in range(1, years_in_retirement + 1):
+        annual_return = float(annual_returns_sequence[year - 1])
+        age = fire_age + year - 1
+        tramo = "Pre-pensión" if age < pension_public_start_age else "Post-pensión"
+
+        income_public = pension_public_net_annual if age >= pension_public_start_age else 0.0
+        income_private = (
+            plan_private_net_annual
+            if plan_private_duration_years > 0 and plan_private_start_age <= age <= plan_private_end_age
+            else 0.0
+        )
+        income_other = other_income_post_pension_annual if age >= pension_public_start_age else 0.0
+        extra_cost = pre_pension_extra_cost_annual if age < pension_public_start_age else 0.0
+
+        annual_need_from_portfolio = max(
+            0.0,
+            annual_spending_base + extra_cost - income_public - income_private - income_other,
+        )
+        annual_mortgage_cost = 0.0
+        if annual_mortgage_schedule and year - 1 < len(annual_mortgage_schedule):
+            annual_mortgage_cost = max(0.0, float(annual_mortgage_schedule[year - 1]))
+        annual_extra_withdrawal = 0.0
+        if annual_extra_withdrawal_schedule and year - 1 < len(annual_extra_withdrawal_schedule):
+            annual_extra_withdrawal = max(0.0, float(annual_extra_withdrawal_schedule[year - 1]))
+        pending_installments_end_year = 0
+        if pending_installments_end_schedule and year - 1 < len(pending_installments_end_schedule):
+            pending_installments_end_year = max(0, int(pending_installments_end_schedule[year - 1]))
+
+        sale_nominal = (
+            max(0.0, float(property_sale_amount)) * inflation_factor
+            if property_sale_enabled and int(property_sale_year) == year
+            else 0.0
+        )
+        capital_inicial = portfolio + sale_nominal
+        retirada = (annual_need_from_portfolio * inflation_factor) + annual_mortgage_cost + annual_extra_withdrawal
+        growth_gross = capital_inicial * annual_return
+        tax_growth = max(0.0, growth_gross) * max(0.0, tax_rate_on_gains)
+        growth_net = growth_gross - tax_growth
+        capital_final = max(0.0, capital_inicial + growth_net - retirada)
+
+        rows.append(
+            {
+                "Año jubilación": year,
+                "Edad": age,
+                "Tramo": tramo,
+                "Necesidad base cartera (€)": annual_spending_base * inflation_factor,
+                "Ingreso pensión pública (€)": income_public * inflation_factor,
+                "Ingreso plan privado (€)": income_private * inflation_factor,
+                "Otras rentas (€)": income_other * inflation_factor,
+                "Ingresos totales (€)": (income_public + income_private + income_other) * inflation_factor,
+                "Coste extra pre-pensión (€)": extra_cost * inflation_factor,
+                "Ajuste venta/alquiler (€)": annual_extra_withdrawal,
+                "Venta inmueble (€)": sale_nominal,
+                "Cuota hipoteca pendiente (€)": annual_mortgage_cost,
+                "Cuotas pendientes fin año": pending_installments_end_year,
+                "Capital inicial (€)": capital_inicial,
+                "Retirada anual (€)": retirada,
+                "Crecimiento neto (€)": growth_net,
+                "Capital final (€)": capital_final,
+                "Capital agotado": capital_final <= 0,
+            }
+        )
         portfolio = capital_final
         inflation_factor *= (1 + inflation_rate)
 
@@ -1615,6 +1795,45 @@ def build_decumulation_table_two_stage_schedule(
     )
 
 
+def build_decumulation_table_two_phase_net_withdrawal(
+    starting_portfolio: float,
+    fire_age: int,
+    years_in_retirement: int,
+    phase2_start_age: int,
+    stage1_net_withdrawal_annual: float,
+    stage2_net_withdrawal_annual: float,
+    inflation_rate: float,
+    tax_rate_on_gains: float,
+    expected_return: Optional[float] = None,
+    annual_returns_sequence: Optional[np.ndarray] = None,
+    annual_mortgage_schedule: Optional[List[float]] = None,
+    pending_installments_end_schedule: Optional[List[int]] = None,
+    property_sale_enabled: bool = False,
+    property_sale_year: int = 0,
+    property_sale_amount: float = 0.0,
+    annual_extra_withdrawal_schedule: Optional[List[float]] = None,
+) -> pd.DataFrame:
+    """Compatibility wrapper around simple two-phase net-withdrawal model."""
+    return build_decumulation_table_two_phase_net_withdrawal_core(
+        starting_portfolio=starting_portfolio,
+        fire_age=fire_age,
+        years_in_retirement=years_in_retirement,
+        phase2_start_age=phase2_start_age,
+        stage1_net_withdrawal_annual=stage1_net_withdrawal_annual,
+        stage2_net_withdrawal_annual=stage2_net_withdrawal_annual,
+        inflation_rate=inflation_rate,
+        tax_rate_on_gains=tax_rate_on_gains,
+        expected_return=expected_return,
+        annual_returns_sequence=annual_returns_sequence,
+        annual_mortgage_schedule=annual_mortgage_schedule,
+        pending_installments_end_schedule=pending_installments_end_schedule,
+        property_sale_enabled=property_sale_enabled,
+        property_sale_year=property_sale_year,
+        property_sale_amount=property_sale_amount,
+        annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+    )
+
+
 def build_retirement_mortgage_schedule(params: Dict[str, Any], years_in_retirement: int) -> Tuple[List[float], List[int]]:
     """Build annual mortgage outflow schedule during retirement.
 
@@ -1666,6 +1885,293 @@ def build_retirement_mortgage_schedule(params: Dict[str, Any], years_in_retireme
     return annual_schedule, installments_end_schedule
 
 
+def render_decumulation_chart(
+    dec_tables: Dict[str, pd.DataFrame],
+    years_in_retirement: int,
+    use_backtesting_mode: bool = False,
+    backtesting_strategy_label: str = "",
+) -> None:
+    """Render retirement decumulation chart with percentile cones and P50 cashflow context."""
+    required = {"P5", "P25", "P50", "P75", "P95"}
+    if not required.issubset(dec_tables.keys()):
+        return
+    if any(dec_tables[k].empty for k in required):
+        return
+
+    def _capital_path(df: pd.DataFrame) -> np.ndarray:
+        start_cap = float(df.iloc[0]["Capital inicial (€)"])
+        end_caps = df["Capital final (€)"].astype(float).to_numpy()
+        return np.concatenate(([start_cap], end_caps))
+
+    years = np.arange(0, years_in_retirement + 1)
+    p5 = _capital_path(dec_tables["P5"])
+    p25 = _capital_path(dec_tables["P25"])
+    p50 = _capital_path(dec_tables["P50"])
+    p75 = _capital_path(dec_tables["P75"])
+    p95 = _capital_path(dec_tables["P95"])
+    # Interpolated central third around median (P33-P67) for tighter readability.
+    p33 = p25 + 0.16 * (p75 - p25)
+    p67 = p25 + 0.84 * (p75 - p25)
+
+    p50_df = dec_tables["P50"]
+    retirada_p50 = np.concatenate(
+        ([np.nan], p50_df["Retirada anual (€)"].astype(float).to_numpy())
+    )
+    ingresos_p50 = (
+        p50_df["Ingresos totales (€)"].astype(float).to_numpy()
+        if "Ingresos totales (€)" in p50_df.columns
+        else np.zeros(len(p50_df), dtype=float)
+    )
+    ingresos_p50 = np.concatenate(([np.nan], ingresos_p50))
+
+    central_view = st.checkbox(
+        "Vista centrada (banda P33-P67)",
+        value=True,
+        key=f"decumulation_chart_central_view_{years_in_retirement}",
+        help="Reduce ruido extremo y centra la lectura en el tercio central.",
+    )
+    chart_mode = st.radio(
+        "Visualización",
+        options=["Separado (recomendado)", "Combinado"],
+        index=0,
+        horizontal=True,
+        key=f"decumulation_chart_mode_{years_in_retirement}",
+    )
+
+    if chart_mode == "Separado (recomendado)":
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.08,
+            row_heights=[0.67, 0.33],
+            subplot_titles=("Capital en jubilación", "Flujos anuales (P50)"),
+        )
+    else:
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    if not central_view:
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=p95,
+                fill=None,
+                mode="lines",
+                line_color="rgba(0,0,0,0)",
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=p5,
+                fill="tonexty",
+                mode="lines",
+                line_color="rgba(0,0,0,0)",
+                name="Capital P5-P95",
+                fillcolor="rgba(31, 119, 180, 0.15)",
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+    if central_view:
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=p67,
+                fill=None,
+                mode="lines",
+                line_color="rgba(0,0,0,0)",
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=p33,
+                fill="tonexty",
+                mode="lines",
+                line_color="rgba(0,0,0,0)",
+                name="Capital P33-P67",
+                fillcolor="rgba(31, 119, 180, 0.30)",
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+    else:
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=p75,
+                fill=None,
+                mode="lines",
+                line_color="rgba(0,0,0,0)",
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=p25,
+                fill="tonexty",
+                mode="lines",
+                line_color="rgba(0,0,0,0)",
+                name="Capital P25-P75",
+                fillcolor="rgba(31, 119, 180, 0.30)",
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=years,
+            y=p50,
+            mode="lines",
+            name="Capital mediano (P50)",
+            line=dict(color="rgb(31, 119, 180)", width=3),
+            hovertemplate="<b>Año %{x}</b><br>Capital P50: €%{y:,.0f}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    if chart_mode == "Separado (recomendado)":
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=retirada_p50,
+                mode="lines",
+                name="Retirada anual P50",
+                line=dict(color="rgba(231, 76, 60, 0.95)", width=2.5, dash="dot"),
+                hovertemplate="<b>Año %{x}</b><br>Retirada: €%{y:,.0f}<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=ingresos_p50,
+                mode="lines",
+                name="Ingresos no cartera P50",
+                line=dict(color="rgba(46, 204, 113, 0.95)", width=2.5, dash="dot"),
+                hovertemplate="<b>Año %{x}</b><br>Ingresos: €%{y:,.0f}<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
+    else:
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=retirada_p50,
+                mode="lines",
+                name="Retirada anual P50",
+                line=dict(color="rgba(231, 76, 60, 0.95)", width=2, dash="dot"),
+                hovertemplate="<b>Año %{x}</b><br>Retirada: €%{y:,.0f}<extra></extra>",
+            ),
+            secondary_y=True,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=ingresos_p50,
+                mode="lines",
+                name="Ingresos no cartera P50",
+                line=dict(color="rgba(46, 204, 113, 0.95)", width=2, dash="dot"),
+                hovertemplate="<b>Año %{x}</b><br>Ingresos: €%{y:,.0f}<extra></extra>",
+            ),
+            secondary_y=True,
+        )
+
+    if "Tramo" in p50_df.columns:
+        post_rows = p50_df[p50_df["Tramo"] == "Post-pensión"]
+        if not post_rows.empty:
+            post_year = int(post_rows.iloc[0]["Año jubilación"])
+            fig.add_vline(x=post_year, line_dash="dash", line_color="rgba(52, 73, 94, 0.6)", line_width=1)
+            if chart_mode == "Separado (recomendado)":
+                fig.add_vline(
+                    x=post_year,
+                    line_dash="dash",
+                    line_color="rgba(52, 73, 94, 0.6)",
+                    line_width=1,
+                    row=2,
+                    col=1,
+                )
+            fig.add_annotation(
+                x=post_year,
+                y=1.0,
+                xref="x",
+                yref="paper",
+                showarrow=False,
+                text="Inicio post-pensión",
+                font=dict(size=11, color="rgba(52, 73, 94, 0.9)"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="rgba(52,73,94,0.25)",
+            )
+
+    fig.update_layout(
+        title="<b>Evolución de capital y retirada en jubilación (decumulación)</b>",
+        hovermode="x unified",
+        template="plotly_white",
+        height=620 if chart_mode == "Separado (recomendado)" else 520,
+        margin=dict(l=50, r=50, t=80, b=50),
+    )
+    fig.update_xaxes(title_text="" if chart_mode == "Separado (recomendado)" else "Años desde FIRE", row=1, col=1)
+    if chart_mode == "Separado (recomendado)":
+        fig.update_xaxes(title_text="Años desde FIRE", row=2, col=1)
+    if central_view:
+        central_max = float(np.nanmax(p67)) if np.isfinite(np.nanmax(p67)) else 0.0
+        central_max = max(1.0, central_max * 1.15)
+        fig.update_yaxes(title_text="Capital (€, nominal)", tickformat=",.0f", range=[0.0, central_max], row=1, col=1)
+    else:
+        fig.update_yaxes(title_text="Capital (€, nominal)", tickformat=",.0f", row=1, col=1)
+    if chart_mode == "Separado (recomendado)":
+        flow_max = float(np.nanmax(np.nan_to_num(np.concatenate([retirada_p50, ingresos_p50]), nan=0.0)))
+        fig.update_yaxes(
+            title_text="Flujo anual (€, nominal)",
+            tickformat=",.0f",
+            range=[0.0, max(1.0, flow_max * 1.2)],
+            row=2,
+            col=1,
+        )
+    else:
+        fig.update_yaxes(title_text="Flujo anual (€, nominal)", tickformat=",.0f", secondary_y=True)
+
+    render_plotly_chart(fig, key=f"decumulation_chart_{years_in_retirement}")
+    if central_view and float(np.nanmax(p95)) > float(np.nanmax(p67)) * 2.0:
+        st.caption(
+            "Vista P33-P67 activa: se prioriza lectura de mediana y banda central. "
+            "El escenario extremo P95 sigue disponible desactivando esta opción."
+        )
+    st.caption(
+        "Azul: capital (banda central y mediana). Rojo: retirada anual P50 desde cartera. "
+        "Verde: ingresos no-cartera (pensión/plan/otras rentas) en P50."
+    )
+    if use_backtesting_mode:
+        strategy_text = f" con estrategia {backtesting_strategy_label}" if backtesting_strategy_label else ""
+        st.caption(
+            "Nota técnica: decumulación en modo backtesting secuencial"
+            f"{strategy_text}; cada escenario P5..P95 usa una ventana histórica representativa."
+        )
+    else:
+        st.caption(
+            "Nota técnica: la decumulación usa trayectorias por escenarios (P5..P95) con retorno implícito."
+        )
+
+
 def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     """Render retirement capital-spending table."""
     st.subheader("🪙 Gasto de capital en jubilación")
@@ -1682,6 +2188,16 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
         value=default_years,
         step=1,
         help="Horizonte de retirada para la tabla de decumulación.",
+    )
+    retirement_model_mode = str(params.get("retirement_model_mode", "SIMPLE_TWO_PHASE"))
+    if retirement_model_mode == "SIMPLE_TWO_PHASE":
+        st.caption("Modelo activo: **Simple en 2 fases** (retirada neta de cartera por tramo).")
+    else:
+        st.caption("Modelo activo: **Avanzado** (pensión pública/plan privado/otras rentas).")
+    decumulation_backtesting_enabled = st.checkbox(
+        "Aplicar backtesting histórico en decumulación",
+        value=False,
+        help="Reproduce secuencias históricas anuales en la fase de retiro y elige ventanas representativas para P5..P95.",
     )
 
     percentile_series = {
@@ -1719,6 +2235,12 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     scenario_expected_return = {
         label: coherent_returns[idx] for idx, label in enumerate(percentile_labels)
     }
+    decumulation_backtesting_effective = False
+    backtesting_strategy = str(params.get("historical_strategy", "sp500_us_total_return"))
+    backtesting_strategy_label = str(
+        params.get("historical_strategy_label", "Estrategia histórica activa")
+    )
+    scenario_window_meta: Dict[str, Dict[str, float]] = {}
     annual_mortgage_schedule, pending_installments_end_schedule = build_retirement_mortgage_schedule(
         params,
         years_in_retirement,
@@ -1752,18 +2274,39 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
         elif retirement_sale_enabled and year >= retirement_sale_year:
             extra_today += rental_drop_annual_today + home_savings_drop_annual_today
         annual_extra_withdrawal_schedule.append(extra_today * (drop_factor ** (year - 1)))
-    two_stage_enabled = params.get("two_stage_retirement_model", False)
+    fire_age = int(params["edad_objetivo"])
+    use_simple_two_phase = retirement_model_mode == "SIMPLE_TWO_PHASE"
+    use_advanced_two_stage = bool(
+        params.get("two_stage_retirement_model", False)
+        and params.get("include_pension_in_simulation", False)
+    )
     stage1_years = 0
     annual_withdrawal_stage1 = annual_withdrawal_base
     annual_withdrawal_stage2 = annual_withdrawal_base
-    pension_public_start_age = int(params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67)))
+    pension_public_start_age = int(
+        params.get(
+            "two_phase_switch_age",
+            params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67)),
+        )
+        if use_simple_two_phase
+        else params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67))
+    )
     plan_private_start_age = int(params.get("edad_inicio_plan_privado", pension_public_start_age))
     plan_private_duration_years = int(params.get("duracion_plan_privado_anos", 0))
     plan_private_net_annual = float(params.get("plan_pensiones_privado_neto_anual", 0.0))
     pension_public_net_annual = float(params.get("pension_publica_neta_anual_efectiva", 0.0))
     other_income_post = float(params.get("otras_rentas_post_jubilacion_netas", 0.0))
-    if two_stage_enabled:
-        fire_age = params["edad_objetivo"]
+    if use_simple_two_phase:
+        annual_withdrawal_stage1 = max(
+            0.0,
+            float(params.get("two_phase_withdrawal_stage1_net_annual", annual_withdrawal_base)),
+        )
+        annual_withdrawal_stage2 = max(
+            0.0,
+            float(params.get("two_phase_withdrawal_stage2_net_annual", annual_withdrawal_base)),
+        )
+        stage1_years = max(0, pension_public_start_age - fire_age)
+    elif use_advanced_two_stage:
         pension_age = pension_public_start_age
         stage1_years = max(0, pension_age - fire_age)
         annual_withdrawal_stage1 = max(
@@ -1776,46 +2319,208 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
         )
 
     dec_tables: Dict[str, pd.DataFrame] = {}
-    for label, start_portfolio in starting_portfolios.items():
-        expected_return_scenario = scenario_expected_return.get(label, default_ret)
-        if two_stage_enabled:
-            dec_tables[label] = build_decumulation_table_two_stage_schedule(
-                starting_portfolio=start_portfolio,
-                fire_age=params["edad_objetivo"],
-                years_in_retirement=years_in_retirement,
-                annual_spending_base=annual_withdrawal_base,
-                pension_public_start_age=pension_public_start_age,
-                pension_public_net_annual=pension_public_net_annual,
-                plan_private_start_age=plan_private_start_age,
-                plan_private_duration_years=plan_private_duration_years,
-                plan_private_net_annual=plan_private_net_annual,
-                other_income_post_pension_annual=other_income_post,
-                pre_pension_extra_cost_annual=float(params.get("coste_pre_pension_anual", 0.0)),
-                expected_return=expected_return_scenario,
-                inflation_rate=params["inflacion"],
-                tax_rate_on_gains=tax_rate_hint,
-                annual_mortgage_schedule=annual_mortgage_schedule,
-                pending_installments_end_schedule=pending_installments_end_schedule,
-                property_sale_enabled=retirement_sale_enabled,
-                property_sale_year=retirement_sale_year,
-                property_sale_amount=retirement_sale_amount,
-                annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+    if decumulation_backtesting_enabled:
+        try:
+            historical_returns = load_historical_annual_returns(strategy=backtesting_strategy)
+        except Exception as exc:
+            st.warning(
+                f"No se pudo activar backtesting en decumulación ({exc}). Se usa modo estándar."
             )
+            historical_returns = None
+
+        if historical_returns is not None and len(historical_returns) >= years_in_retirement:
+            windows_total = len(historical_returns) - years_in_retirement + 1
+            target_pct = {"P5": 0.05, "P25": 0.25, "P50": 0.50, "P75": 0.75, "P95": 0.95}
+            decumulation_backtesting_effective = True
+
+            for label, start_portfolio in starting_portfolios.items():
+                candidates: List[Tuple[float, float, int, pd.DataFrame]] = []
+                for idx in range(windows_total):
+                    annual_seq = np.asarray(
+                        historical_returns[idx : idx + years_in_retirement],
+                        dtype=float,
+                    )
+                    if use_simple_two_phase:
+                        table = build_decumulation_table_two_phase_net_withdrawal(
+                            starting_portfolio=start_portfolio,
+                            fire_age=fire_age,
+                            years_in_retirement=years_in_retirement,
+                            phase2_start_age=pension_public_start_age,
+                            stage1_net_withdrawal_annual=annual_withdrawal_stage1,
+                            stage2_net_withdrawal_annual=annual_withdrawal_stage2,
+                            inflation_rate=params["inflacion"],
+                            tax_rate_on_gains=tax_rate_hint,
+                            annual_returns_sequence=annual_seq,
+                            annual_mortgage_schedule=annual_mortgage_schedule,
+                            pending_installments_end_schedule=pending_installments_end_schedule,
+                            property_sale_enabled=retirement_sale_enabled,
+                            property_sale_year=retirement_sale_year,
+                            property_sale_amount=retirement_sale_amount,
+                            annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+                        )
+                    elif use_advanced_two_stage:
+                        table = build_decumulation_table_two_stage_schedule_with_return_path(
+                            starting_portfolio=start_portfolio,
+                            fire_age=fire_age,
+                            annual_spending_base=annual_withdrawal_base,
+                            pension_public_start_age=pension_public_start_age,
+                            pension_public_net_annual=pension_public_net_annual,
+                            plan_private_start_age=plan_private_start_age,
+                            plan_private_duration_years=plan_private_duration_years,
+                            plan_private_net_annual=plan_private_net_annual,
+                            other_income_post_pension_annual=other_income_post,
+                            pre_pension_extra_cost_annual=float(params.get("coste_pre_pension_anual", 0.0)),
+                            annual_returns_sequence=annual_seq,
+                            inflation_rate=params["inflacion"],
+                            tax_rate_on_gains=tax_rate_hint,
+                            annual_mortgage_schedule=annual_mortgage_schedule,
+                            pending_installments_end_schedule=pending_installments_end_schedule,
+                            property_sale_enabled=retirement_sale_enabled,
+                            property_sale_year=retirement_sale_year,
+                            property_sale_amount=retirement_sale_amount,
+                            annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+                        )
+                    else:
+                        table = build_decumulation_table_with_return_path(
+                            starting_portfolio=start_portfolio,
+                            annual_withdrawal_base=annual_withdrawal_base,
+                            annual_returns_sequence=annual_seq,
+                            inflation_rate=params["inflacion"],
+                            tax_rate_on_gains=tax_rate_hint,
+                            annual_mortgage_schedule=annual_mortgage_schedule,
+                            pending_installments_end_schedule=pending_installments_end_schedule,
+                            property_sale_enabled=retirement_sale_enabled,
+                            property_sale_year=retirement_sale_year,
+                            property_sale_amount=retirement_sale_amount,
+                            annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+                        )
+                    final_cap = float(table.iloc[-1]["Capital final (€)"]) if not table.empty else 0.0
+                    total_growth = float(np.prod(1.0 + annual_seq))
+                    cagr = (
+                        float(total_growth ** (1.0 / years_in_retirement) - 1.0)
+                        if years_in_retirement > 0 and total_growth > 0.0
+                        else -1.0
+                    )
+                    candidates.append((final_cap, cagr, idx, table))
+
+                candidates.sort(key=lambda x: x[0])
+                q = target_pct.get(label, 0.5)
+                rank = int(round((len(candidates) - 1) * q))
+                rank = max(0, min(len(candidates) - 1, rank))
+                _, cagr_sel, window_idx, table_sel = candidates[rank]
+                dec_tables[label] = table_sel
+                scenario_expected_return[label] = cagr_sel
+                scenario_window_meta[label] = {
+                    "window_index": float(window_idx + 1),
+                    "windows_total": float(windows_total),
+                }
         else:
-            dec_tables[label] = build_decumulation_table(
-                starting_portfolio=start_portfolio,
-                annual_withdrawal_base=annual_withdrawal_base,
-                years_in_retirement=years_in_retirement,
-                expected_return=expected_return_scenario,
-                inflation_rate=params["inflacion"],
-                tax_rate_on_gains=tax_rate_hint,
-                annual_mortgage_schedule=annual_mortgage_schedule,
-                pending_installments_end_schedule=pending_installments_end_schedule,
-                property_sale_enabled=retirement_sale_enabled,
-                property_sale_year=retirement_sale_year,
-                property_sale_amount=retirement_sale_amount,
-                annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+            st.warning(
+                "No hay suficientes datos históricos para backtesting en decumulación con este horizonte. "
+                "Se usa modo estándar."
             )
+
+    if not dec_tables:
+        for label, start_portfolio in starting_portfolios.items():
+            expected_return_scenario = scenario_expected_return.get(label, default_ret)
+            if use_simple_two_phase:
+                dec_tables[label] = build_decumulation_table_two_phase_net_withdrawal(
+                    starting_portfolio=start_portfolio,
+                    fire_age=fire_age,
+                    years_in_retirement=years_in_retirement,
+                    phase2_start_age=pension_public_start_age,
+                    stage1_net_withdrawal_annual=annual_withdrawal_stage1,
+                    stage2_net_withdrawal_annual=annual_withdrawal_stage2,
+                    inflation_rate=params["inflacion"],
+                    tax_rate_on_gains=tax_rate_hint,
+                    expected_return=expected_return_scenario,
+                    annual_mortgage_schedule=annual_mortgage_schedule,
+                    pending_installments_end_schedule=pending_installments_end_schedule,
+                    property_sale_enabled=retirement_sale_enabled,
+                    property_sale_year=retirement_sale_year,
+                    property_sale_amount=retirement_sale_amount,
+                    annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+                )
+            elif use_advanced_two_stage:
+                dec_tables[label] = build_decumulation_table_two_stage_schedule(
+                    starting_portfolio=start_portfolio,
+                    fire_age=fire_age,
+                    years_in_retirement=years_in_retirement,
+                    annual_spending_base=annual_withdrawal_base,
+                    pension_public_start_age=pension_public_start_age,
+                    pension_public_net_annual=pension_public_net_annual,
+                    plan_private_start_age=plan_private_start_age,
+                    plan_private_duration_years=plan_private_duration_years,
+                    plan_private_net_annual=plan_private_net_annual,
+                    other_income_post_pension_annual=other_income_post,
+                    pre_pension_extra_cost_annual=float(params.get("coste_pre_pension_anual", 0.0)),
+                    expected_return=expected_return_scenario,
+                    inflation_rate=params["inflacion"],
+                    tax_rate_on_gains=tax_rate_hint,
+                    annual_mortgage_schedule=annual_mortgage_schedule,
+                    pending_installments_end_schedule=pending_installments_end_schedule,
+                    property_sale_enabled=retirement_sale_enabled,
+                    property_sale_year=retirement_sale_year,
+                    property_sale_amount=retirement_sale_amount,
+                    annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+                )
+            else:
+                dec_tables[label] = build_decumulation_table(
+                    starting_portfolio=start_portfolio,
+                    annual_withdrawal_base=annual_withdrawal_base,
+                    years_in_retirement=years_in_retirement,
+                    expected_return=expected_return_scenario,
+                    inflation_rate=params["inflacion"],
+                    tax_rate_on_gains=tax_rate_hint,
+                    annual_mortgage_schedule=annual_mortgage_schedule,
+                    pending_installments_end_schedule=pending_installments_end_schedule,
+                    property_sale_enabled=retirement_sale_enabled,
+                    property_sale_year=retirement_sale_year,
+                    property_sale_amount=retirement_sale_amount,
+                    annual_extra_withdrawal_schedule=annual_extra_withdrawal_schedule,
+                )
+
+    if use_simple_two_phase:
+        bridge_years = max(0, pension_public_start_age - fire_age)
+        bridge_capital_required = 0.0
+        for year in range(1, bridge_years + 1):
+            base = annual_withdrawal_stage1 * ((1 + params["inflacion"]) ** (year - 1))
+            mortgage = annual_mortgage_schedule[year - 1] if year - 1 < len(annual_mortgage_schedule) else 0.0
+            extra = (
+                annual_extra_withdrawal_schedule[year - 1]
+                if year - 1 < len(annual_extra_withdrawal_schedule)
+                else 0.0
+            )
+            bridge_capital_required += float(base + mortgage + extra)
+        available_fire_p50 = float(starting_portfolios.get("P50", 0.0))
+        bridge_delta = available_fire_p50 - bridge_capital_required
+        stage1_rate = (
+            (annual_withdrawal_stage1 / available_fire_p50) * 100.0
+            if available_fire_p50 > 0.0
+            else 0.0
+        )
+        stage2_rate = (
+            (annual_withdrawal_stage2 / available_fire_p50) * 100.0
+            if available_fire_p50 > 0.0
+            else 0.0
+        )
+        c_bridge_1, c_bridge_2 = st.columns(2)
+        c_bridge_1.metric(
+            "Capital necesario para puente (fase 1)",
+            fmt_eur(bridge_capital_required),
+            delta=f"{bridge_years} años pre-pensión",
+            delta_color="off",
+        )
+        c_bridge_2.metric(
+            "Capital disponible al FIRE (P50)",
+            fmt_eur(available_fire_p50),
+            delta=f"{fmt_num_es(bridge_delta, signed=True)} € vs puente",
+            delta_color="normal",
+        )
+        st.caption(
+            f"Tu plan depende de aguantar {bridge_years} años con retirada ~{stage1_rate:.1f}% antes de pensión; "
+            f"luego baja a ~{stage2_rate:.1f}%."
+        )
 
     rental_income_base = (
         float(params.get("renta_neta_alquiler_anual_efectiva", 0.0))
@@ -1889,6 +2594,13 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     for col, label in zip(depletion_cols, percentile_series.keys()):
         col.metric(f"Agotamiento {label}", depletion_texts[label])
 
+    render_decumulation_chart(
+        dec_tables,
+        years_in_retirement,
+        use_backtesting_mode=decumulation_backtesting_effective,
+        backtesting_strategy_label=backtesting_strategy_label,
+    )
+
     tab_labels = [
         "Escenario muy adverso (P5)",
         "Escenario conservador (P25)",
@@ -1900,10 +2612,16 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
     for tab, label in zip(tabs, percentile_series.keys()):
         with tab:
             implied_return = float(scenario_expected_return.get(label, params["rentabilidad_neta_simulacion"]))
+            implied_delta = "Aplicado a este escenario"
+            if decumulation_backtesting_effective and label in scenario_window_meta:
+                meta = scenario_window_meta[label]
+                implied_delta = (
+                    f"Ventana histórica #{int(meta['window_index'])}/{int(meta['windows_total'])}"
+                )
             st.metric(
                 "📈 Retorno anual implícito usado",
                 f"{implied_return*100:.2f}%",
-                delta="Aplicado a este escenario",
+                delta=implied_delta,
                 delta_color="off",
             )
 
@@ -2063,7 +2781,32 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
             f"P75 {scenario_expected_return['P75']*100:.2f}% · "
             f"P95 {scenario_expected_return['P95']*100:.2f}%"
         )
-        if two_stage_enabled:
+        cagr_source_line = (
+            f"- Retorno anual usado por escenario (ventanas históricas representativas, {backtesting_strategy_label}): {cagr_text}.\n"
+            if decumulation_backtesting_effective
+            else f"- Retorno anual usado por escenario (CAGR implícito de acumulación): {cagr_text}.\n"
+        )
+        if use_simple_two_phase:
+            st.write(
+                "- Capital inicial: percentiles 5, 25, 50, 75 y 95 al final del horizonte de acumulación.\n"
+                f"- Modelo simple de 2 fases: pre-pensión {stage1_years} años (hasta edad {pension_public_start_age}).\n"
+                f"- Retirada neta fase 1 (euros de hoy): {fmt_eur(annual_withdrawal_stage1)}/año.\n"
+                f"- Retirada neta fase 2 (euros de hoy): {fmt_eur(annual_withdrawal_stage2)}/año.\n"
+                "- Ambas retiradas se actualizan automáticamente por inflación año a año.\n"
+                f"{cagr_source_line}"
+                f"- Impuesto orientativo sobre crecimiento: {tax_rate_hint*100:.1f}%.\n"
+                f"- Cuotas hipotecarias pendientes al arrancar jubilación: {pending_installments_end_schedule[0] if pending_installments_end_schedule else 0} "
+                "(se descuentan año a año y desaparecen al terminar de pagar).\n"
+                f"- Venta inmobiliaria en jubilación: {'sí' if retirement_sale_enabled else 'no'}"
+                + (
+                    f" (año {retirement_sale_year}, neto {fmt_eur(retirement_sale_amount)} tras impuesto estimado)."
+                    if retirement_sale_enabled
+                    else "."
+                )
+                + "\n"
+                "- Este modo asume cartera unificada; para desglose fiscal por tipo de ingreso usa modo avanzado."
+            )
+        elif use_advanced_two_stage:
             st.write(
                 "- Capital inicial: percentiles 5, 25, 50, 75 y 95 al final del horizonte de acumulación.\n"
                 f"- Tramo pre-pensión: {stage1_years} años (hasta edad {pension_public_start_age}).\n"
@@ -2072,7 +2815,7 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
                 f"durante {plan_private_duration_years} años.\n"
                 f"- Otras rentas post-pensión: {fmt_eur(other_income_post)}/año.\n"
                 "- Ambos tramos se actualizan por inflación año a año.\n"
-                f"- Retorno anual usado por escenario (CAGR implícito de acumulación): {cagr_text}.\n"
+                f"{cagr_source_line}"
                 f"- Impuesto orientativo sobre crecimiento: {tax_rate_hint*100:.1f}%.\n"
                 f"- Cuotas hipotecarias pendientes al arrancar jubilación: {pending_installments_end_schedule[0] if pending_installments_end_schedule else 0} "
                 "(se descuentan año a año y desaparecen al terminar de pagar).\n"
@@ -2089,7 +2832,7 @@ def render_decumulation_box(simulation_results: Dict, params: Dict) -> None:
             st.write(
                 "- Capital inicial: percentiles 5, 25, 50, 75 y 95 al final del horizonte de acumulación.\n"
                 f"- Retirada base anual: {fmt_eur(annual_withdrawal_base)} (se actualiza por inflación).\n"
-                f"- Retorno anual usado por escenario (CAGR implícito de acumulación): {cagr_text}.\n"
+                f"{cagr_source_line}"
                 f"- Impuesto orientativo sobre crecimiento: {tax_rate_hint*100:.1f}%.\n"
                 f"- Cuotas hipotecarias pendientes al arrancar jubilación: {pending_installments_end_schedule[0] if pending_installments_end_schedule else 0} "
                 "(se descuentan año a año y desaparecen al terminar de pagar).\n"
@@ -2367,6 +3110,54 @@ def run_cached_simulation(
     )
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_cached_sensitivity_cell(
+    params_key: str,
+    initial_wealth: float,
+    monthly_contribution: float,
+    years: int,
+    mean_return: float,
+    volatility: float,
+    inflation_rate: float,
+    annual_spending: float,
+    safe_withdrawal_rate: float,
+    contribution_growth_rate: float,
+    property_sale_enabled: bool,
+    property_sale_year: int,
+    property_sale_amount: float,
+    rental_drop_enabled: bool,
+    rental_drop_year: int,
+    rental_drop_annual_amount: float,
+    tax_pack: Optional[Dict],
+    region: Optional[str],
+    num_simulations: int = 3000,
+) -> Dict:
+    """Cached Monte Carlo run for a single sensitivity matrix cell."""
+    return monte_carlo_simulation(
+        initial_wealth=initial_wealth,
+        monthly_contribution=monthly_contribution,
+        years=years,
+        mean_return=mean_return,
+        volatility=volatility,
+        inflation_rate=inflation_rate,
+        annual_spending=annual_spending,
+        safe_withdrawal_rate=safe_withdrawal_rate,
+        contribution_growth_rate=contribution_growth_rate,
+        model_type="normal",
+        historical_strategy="sp500_us_total_return",
+        property_sale_enabled=property_sale_enabled,
+        property_sale_year=property_sale_year,
+        property_sale_amount=property_sale_amount,
+        rental_drop_enabled=rental_drop_enabled,
+        rental_drop_year=rental_drop_year,
+        rental_drop_annual_amount=rental_drop_annual_amount,
+        num_simulations=num_simulations,
+        seed=42,
+        tax_pack=tax_pack,
+        region=region,
+    )
+
+
 # =====================================================================
 # 5. SIDEBAR - INPUT COLLECTION & PARAMETER PANEL
 # =====================================================================
@@ -2424,6 +3215,9 @@ def render_sidebar() -> Dict:
             "property_sale_selling_costs": "property_sale_selling_costs_key",
             "include_pension_in_simulation": "include_pension_in_simulation_key",
             "two_stage_retirement_model": "two_stage_retirement_model_key",
+            "two_phase_switch_age": "two_phase_switch_age_key",
+            "two_phase_withdrawal_stage1_net_annual": "two_phase_withdrawal_stage1_net_annual_key",
+            "two_phase_withdrawal_stage2_net_annual": "two_phase_withdrawal_stage2_net_annual_key",
             "edad_pension_oficial": "edad_pension_oficial_key",
             "edad_inicio_pension_publica": "edad_inicio_pension_publica_key",
             "bonificacion_demora_pct": "bonificacion_demora_pct_key",
@@ -2466,6 +3260,12 @@ def render_sidebar() -> Dict:
                 "Internacional básico"
                 if config["fiscal_mode"] == FISCAL_MODE_INTL_BASIC
                 else "España (Tax Pack)"
+            )
+        if "retirement_model_mode" in config:
+            st.session_state["retirement_model_mode_key"] = (
+                "Avanzado (desglose de ingresos)"
+                if config["retirement_model_mode"] == "ADVANCED_INCOME_BREAKDOWN"
+                else "Simple (recomendado)"
             )
         if "region" in config:
             st.session_state["loaded_profile_region_code"] = config["region"]
@@ -3150,171 +3950,271 @@ def render_sidebar() -> Dict:
                 "La simulación descuenta un impuesto estimado sobre la parte de plusvalía y usa el importe neto como entrada de capital."
             )
 
-    with st.sidebar.expander("🧓 Pensión y retiro en 2 tramos (opcional)", expanded=False):
-        include_pension_in_simulation = st.checkbox(
-            "Incluir planes/pensión en simulación",
-            value=False,
-            key="include_pension_in_simulation_key",
-            help="Si está desactivado, la simulación no tendrá en cuenta pensión ni planes.",
-        )
-        two_stage_retirement_model = st.checkbox(
-            "Activar tramo pre-pensión y tramo post-pensión",
-            value=False,
-            key="two_stage_retirement_model_key",
-            disabled=not include_pension_in_simulation,
+    with st.sidebar.expander("🧓 Retiro en 2 fases", expanded=False):
+        retirement_model_mode_label = st.selectbox(
+            "Modelo de retiro",
+            options=["Simple (recomendado)", "Avanzado (desglose de ingresos)"],
+            index=0,
+            key="retirement_model_mode_key",
             help=(
-                "Permite modelar una etapa desde FIRE hasta la edad de pensión con retirada más alta "
-                "y otra etapa posterior con menor retirada de cartera por efecto de la pensión."
+                "Simple: defines retirada neta de cartera por fases. "
+                "Avanzado: detallas pensión pública/plan privado/otras rentas."
             ),
         )
-        edad_pension_oficial = st.slider(
-            "Edad legal de pensión (referencia)",
-            min_value=50,
-            max_value=100,
-            value=67,
-            step=1,
-            key="edad_pension_oficial_key",
-            disabled=not include_pension_in_simulation,
+        retirement_model_mode = (
+            "SIMPLE_TWO_PHASE"
+            if retirement_model_mode_label == "Simple (recomendado)"
+            else "ADVANCED_INCOME_BREAKDOWN"
         )
-        edad_inicio_pension_publica = st.slider(
-            "Edad de inicio de pensión pública",
-            min_value=50,
-            max_value=100,
-            value=67,
-            step=1,
-            key="edad_inicio_pension_publica_key",
-            disabled=not include_pension_in_simulation,
-            help="Permite retrasar la pensión pública respecto a la edad legal.",
-        )
-        bonificacion_demora_pct = st.slider(
-            "Ajuste anual por anticipo/demora de pensión pública (%)",
-            min_value=0.0,
-            max_value=8.0,
-            value=4.0,
-            step=0.5,
-            key="bonificacion_demora_pct_key",
-            disabled=not include_pension_in_simulation,
-            help=(
-                "Se aplica por cada año de diferencia entre edad legal e inicio real. "
-                "Si inicias antes, el ajuste total será negativo; si inicias después, positivo."
-            ),
-        ) / 100.0
-        pension_publica_neta_anual = st.number_input(
-            "Pensión pública neta anual esperada (€ de hoy)",
-            min_value=0,
-            max_value=200_000,
-            value=0,
-            step=1_000,
-            key="pension_publica_neta_anual_key",
-            disabled=not include_pension_in_simulation,
-        )
-        years_delta = edad_inicio_pension_publica - edad_pension_oficial
-        pension_publica_neta_anual_efectiva = calculate_effective_public_pension_annual(
-            pension_publica_neta_anual=pension_publica_neta_anual,
-            edad_pension_oficial=edad_pension_oficial,
-            edad_inicio_pension_publica=edad_inicio_pension_publica,
-            ajuste_anual_pct=bonificacion_demora_pct,
-        )
-        if include_pension_in_simulation and years_delta > 0:
-            st.caption(
-                f"Pensión pública ajustada por demora ({years_delta} años): {fmt_eur(pension_publica_neta_anual_efectiva)}/año."
-            )
-        elif include_pension_in_simulation and years_delta < 0:
-            st.caption(
-                f"Pensión pública ajustada por anticipo ({abs(years_delta)} años): {fmt_eur(pension_publica_neta_anual_efectiva)}/año."
-            )
-        elif include_pension_in_simulation:
-            st.caption(
-                f"Pensión pública usada en simulación: {fmt_eur(pension_publica_neta_anual_efectiva)}/año."
-            )
 
-        edad_inicio_plan_privado = st.slider(
-            "Edad de inicio del plan privado",
-            min_value=50,
-            max_value=100,
-            value=63,
-            step=1,
-            key="edad_inicio_plan_privado_key",
-            disabled=not include_pension_in_simulation,
-            help="Permite rescatar plan privado antes o después de la pensión pública.",
-        )
-        duracion_plan_privado_anos = st.slider(
-            "Duración del plan privado (años)",
-            min_value=0,
-            max_value=40,
-            value=0,
-            step=1,
-            key="duracion_plan_privado_anos_key",
-            disabled=not include_pension_in_simulation,
-            help="Años durante los que se cobra el plan privado (0 = no se cobra).",
-        )
-        plan_pensiones_privado_neto_anual = st.number_input(
-            "Plan de pensiones privado neto anual (€ de hoy)",
-            min_value=0,
-            max_value=200_000,
-            value=0,
-            step=1_000,
-            key="plan_pensiones_privado_neto_anual_key",
-            disabled=not include_pension_in_simulation,
-        )
-        otras_rentas_post_jubilacion_netas = st.number_input(
-            "Otras rentas netas post-jubilación (€ de hoy)",
-            min_value=0,
-            max_value=200_000,
-            value=0,
-            step=500,
-            key="otras_rentas_post_jubilacion_netas_key",
-            disabled=not include_pension_in_simulation,
-            help="Ingresos recurrentes netos esperados que reduzcan la retirada de cartera.",
-        )
-        pension_neta_anual = (
-            pension_publica_neta_anual_efectiva
-            + plan_pensiones_privado_neto_anual
-            + otras_rentas_post_jubilacion_netas
-        )
-        pension_neta_anual = pension_neta_anual if include_pension_in_simulation else 0.0
+        # Defaults for backward-compatible simple-mode prefill.
+        legacy_pre_extra = float(st.session_state.get("coste_pre_pension_anual_key", 0.0))
+        legacy_public = float(st.session_state.get("pension_publica_neta_anual_key", 0.0))
+        legacy_private = float(st.session_state.get("plan_pensiones_privado_neto_anual_key", 0.0))
+        legacy_other = float(st.session_state.get("otras_rentas_post_jubilacion_netas_key", 0.0))
+        default_phase2_age = int(st.session_state.get("edad_inicio_pension_publica_key", max(edad_objetivo, 67)))
+        default_stage1 = max(0.0, float(gastos_anuales) + legacy_pre_extra)
+        default_stage2 = max(0.0, float(gastos_anuales) - legacy_public - legacy_private - legacy_other)
 
-        coste_pre_pension_anual = st.number_input(
-            "Coste anual extra antes de pensión pública (€ de hoy)",
-            min_value=0,
-            max_value=200_000,
-            value=0,
-            step=500,
-            key="coste_pre_pension_anual_key",
-            disabled=not include_pension_in_simulation or not two_stage_retirement_model,
-            help=(
-                "No está ligado al rescate del plan privado. "
-                "Aplica solo al tramo previo al inicio de la pensión pública."
-            ),
-        )
-        if include_pension_in_simulation:
+        # Initialize all compatibility fields.
+        include_pension_in_simulation = False
+        two_stage_retirement_model = True
+        edad_pension_oficial = 67
+        edad_inicio_pension_publica = max(50, min(100, default_phase2_age))
+        bonificacion_demora_pct = 0.0
+        pension_publica_neta_anual = 0.0
+        pension_publica_neta_anual_efectiva = 0.0
+        edad_inicio_plan_privado = edad_inicio_pension_publica
+        duracion_plan_privado_anos = 0
+        plan_pensiones_privado_neto_anual = 0.0
+        otras_rentas_post_jubilacion_netas = 0.0
+        pension_neta_anual = 0.0
+        coste_pre_pension_anual = 0.0
+        two_phase_switch_age = edad_inicio_pension_publica
+        two_phase_withdrawal_stage1_net_annual = default_stage1
+        two_phase_withdrawal_stage2_net_annual = default_stage2
+
+        if retirement_model_mode == "SIMPLE_TWO_PHASE":
             st.caption(
-                f"Ingreso neto total considerado post-jubilación: {fmt_eur(pension_neta_anual)}/año."
+                "Modo simple: cartera unificada. La retirada se define directamente por fase y se ajusta por inflación."
             )
-        if two_stage_retirement_model and include_pension_in_simulation:
+            two_phase_switch_age = st.slider(
+                "Edad de inicio fase 2 (post-pensión)",
+                min_value=50,
+                max_value=100,
+                value=max(50, min(100, default_phase2_age)),
+                step=1,
+                key="two_phase_switch_age_key",
+            )
+            two_phase_withdrawal_stage1_net_annual = float(
+                st.number_input(
+                    "Retirada neta fase 1 (€/año de hoy)",
+                    min_value=0,
+                    max_value=500_000,
+                    value=int(default_stage1),
+                    step=1_000,
+                    key="two_phase_withdrawal_stage1_net_annual_key",
+                )
+            )
+            two_phase_withdrawal_stage2_net_annual = float(
+                st.number_input(
+                    "Retirada neta fase 2 (€/año de hoy)",
+                    min_value=0,
+                    max_value=500_000,
+                    value=int(default_stage2),
+                    step=1_000,
+                    key="two_phase_withdrawal_stage2_net_annual_key",
+                )
+            )
             st.caption(
-                "En decumulación, tramo 1 = FIRE→pensión; tramo 2 = post-pensión. "
-                "La pensión reduce la retirada que debe cubrir la cartera."
+                "Se actualiza automáticamente por inflación. "
+                "Fiscalidad detallada por tipo de instrumento solo en modo avanzado."
             )
-        auto_two_stage_from_income = bool(
-            include_pension_in_simulation
-            and (
-                float(pension_publica_neta_anual_efectiva) > 0.0
-                or float(plan_pensiones_privado_neto_anual) > 0.0
-                or float(otras_rentas_post_jubilacion_netas) > 0.0
-                or float(coste_pre_pension_anual) > 0.0
+            # Compatibility aliases used by legacy flows.
+            edad_inicio_pension_publica = two_phase_switch_age
+            edad_pension_oficial = two_phase_switch_age
+        else:
+            include_pension_in_simulation = st.checkbox(
+                "Incluir planes/pensión en simulación",
+                value=False,
+                key="include_pension_in_simulation_key",
+                help="Si está desactivado, la simulación no tendrá en cuenta pensión ni planes.",
             )
-        )
-        two_stage_retirement_model = bool(
-            include_pension_in_simulation and (two_stage_retirement_model or auto_two_stage_from_income)
-        )
-        if include_pension_in_simulation and auto_two_stage_from_income:
-            st.caption(
-                "Modelo 2 tramos activado automáticamente porque hay ingresos/costes de pensión configurados."
+            two_stage_retirement_model = st.checkbox(
+                "Activar tramo pre-pensión y tramo post-pensión",
+                value=False,
+                key="two_stage_retirement_model_key",
+                disabled=not include_pension_in_simulation,
+                help=(
+                    "Permite modelar una etapa desde FIRE hasta la edad de pensión con retirada más alta "
+                    "y otra etapa posterior con menor retirada de cartera por efecto de la pensión."
+                ),
             )
-        if not include_pension_in_simulation:
-            pension_neta_anual = 0.0
-            coste_pre_pension_anual = 0.0
+            edad_pension_oficial = st.slider(
+                "Edad legal de pensión (referencia)",
+                min_value=50,
+                max_value=100,
+                value=67,
+                step=1,
+                key="edad_pension_oficial_key",
+                disabled=not include_pension_in_simulation,
+            )
+            edad_inicio_pension_publica = st.slider(
+                "Edad de inicio de pensión pública",
+                min_value=50,
+                max_value=100,
+                value=67,
+                step=1,
+                key="edad_inicio_pension_publica_key",
+                disabled=not include_pension_in_simulation,
+                help="Permite retrasar la pensión pública respecto a la edad legal.",
+            )
+            bonificacion_demora_pct = st.slider(
+                "Ajuste anual por anticipo/demora de pensión pública (%)",
+                min_value=0.0,
+                max_value=8.0,
+                value=4.0,
+                step=0.5,
+                key="bonificacion_demora_pct_key",
+                disabled=not include_pension_in_simulation,
+                help=(
+                    "Se aplica por cada año de diferencia entre edad legal e inicio real. "
+                    "Si inicias antes, el ajuste total será negativo; si inicias después, positivo."
+                ),
+            ) / 100.0
+            pension_publica_neta_anual = st.number_input(
+                "Pensión pública neta anual esperada (€ de hoy)",
+                min_value=0,
+                max_value=200_000,
+                value=0,
+                step=1_000,
+                key="pension_publica_neta_anual_key",
+                disabled=not include_pension_in_simulation,
+            )
+            years_delta = edad_inicio_pension_publica - edad_pension_oficial
+            pension_publica_neta_anual_efectiva = calculate_effective_public_pension_annual(
+                pension_publica_neta_anual=pension_publica_neta_anual,
+                edad_pension_oficial=edad_pension_oficial,
+                edad_inicio_pension_publica=edad_inicio_pension_publica,
+                ajuste_anual_pct=bonificacion_demora_pct,
+            )
+            if include_pension_in_simulation and years_delta > 0:
+                st.caption(
+                    f"Pensión pública ajustada por demora ({years_delta} años): {fmt_eur(pension_publica_neta_anual_efectiva)}/año."
+                )
+            elif include_pension_in_simulation and years_delta < 0:
+                st.caption(
+                    f"Pensión pública ajustada por anticipo ({abs(years_delta)} años): {fmt_eur(pension_publica_neta_anual_efectiva)}/año."
+                )
+            elif include_pension_in_simulation:
+                st.caption(
+                    f"Pensión pública usada en simulación: {fmt_eur(pension_publica_neta_anual_efectiva)}/año."
+                )
+
+            edad_inicio_plan_privado = st.slider(
+                "Edad de inicio del plan privado",
+                min_value=50,
+                max_value=100,
+                value=63,
+                step=1,
+                key="edad_inicio_plan_privado_key",
+                disabled=not include_pension_in_simulation,
+                help="Permite rescatar plan privado antes o después de la pensión pública.",
+            )
+            duracion_plan_privado_anos = st.slider(
+                "Duración del plan privado (años)",
+                min_value=0,
+                max_value=40,
+                value=0,
+                step=1,
+                key="duracion_plan_privado_anos_key",
+                disabled=not include_pension_in_simulation,
+                help="Años durante los que se cobra el plan privado (0 = no se cobra).",
+            )
+            plan_pensiones_privado_neto_anual = st.number_input(
+                "Plan de pensiones privado neto anual (€ de hoy)",
+                min_value=0,
+                max_value=200_000,
+                value=0,
+                step=1_000,
+                key="plan_pensiones_privado_neto_anual_key",
+                disabled=not include_pension_in_simulation,
+            )
+            otras_rentas_post_jubilacion_netas = st.number_input(
+                "Otras rentas netas post-jubilación (€ de hoy)",
+                min_value=0,
+                max_value=200_000,
+                value=0,
+                step=500,
+                key="otras_rentas_post_jubilacion_netas_key",
+                disabled=not include_pension_in_simulation,
+                help="Ingresos recurrentes netos esperados que reduzcan la retirada de cartera.",
+            )
+            pension_neta_anual = (
+                pension_publica_neta_anual_efectiva
+                + plan_pensiones_privado_neto_anual
+                + otras_rentas_post_jubilacion_netas
+            )
+            pension_neta_anual = pension_neta_anual if include_pension_in_simulation else 0.0
+
+            coste_pre_pension_anual = st.number_input(
+                "Coste anual extra antes de pensión pública (€ de hoy)",
+                min_value=0,
+                max_value=200_000,
+                value=0,
+                step=500,
+                key="coste_pre_pension_anual_key",
+                disabled=not include_pension_in_simulation or not two_stage_retirement_model,
+                help=(
+                    "No está ligado al rescate del plan privado. "
+                    "Aplica solo al tramo previo al inicio de la pensión pública."
+                ),
+            )
+            if include_pension_in_simulation:
+                st.caption(
+                    f"Ingreso neto total considerado post-jubilación: {fmt_eur(pension_neta_anual)}/año."
+                )
+            if two_stage_retirement_model and include_pension_in_simulation:
+                st.caption(
+                    "En decumulación, tramo 1 = FIRE→pensión; tramo 2 = post-pensión. "
+                    "La pensión reduce la retirada que debe cubrir la cartera."
+                )
+            auto_two_stage_from_income = bool(
+                include_pension_in_simulation
+                and (
+                    float(pension_publica_neta_anual_efectiva) > 0.0
+                    or float(plan_pensiones_privado_neto_anual) > 0.0
+                    or float(otras_rentas_post_jubilacion_netas) > 0.0
+                    or float(coste_pre_pension_anual) > 0.0
+                )
+            )
+            two_stage_retirement_model = bool(
+                include_pension_in_simulation and (two_stage_retirement_model or auto_two_stage_from_income)
+            )
+            if include_pension_in_simulation and auto_two_stage_from_income:
+                st.caption(
+                    "Modelo 2 tramos activado automáticamente porque hay ingresos/costes de pensión configurados."
+                )
+            if not include_pension_in_simulation:
+                pension_neta_anual = 0.0
+                coste_pre_pension_anual = 0.0
+
+            # Backfill simple fields from advanced setup when available.
+            two_phase_switch_age = edad_inicio_pension_publica
+            pre_income_approx = 0.0
+            if (
+                int(duracion_plan_privado_anos) > 0
+                and int(edad_inicio_plan_privado) <= int(edad_objetivo)
+            ):
+                pre_income_approx += float(plan_pensiones_privado_neto_anual)
+            two_phase_withdrawal_stage1_net_annual = max(
+                0.0,
+                float(gastos_anuales) + float(coste_pre_pension_anual) - pre_income_approx,
+            )
+            two_phase_withdrawal_stage2_net_annual = max(
+                0.0,
+                float(gastos_anuales) - float(pension_neta_anual),
+            )
 
     st.sidebar.divider()
 
@@ -3388,9 +4288,14 @@ def render_sidebar() -> Dict:
         options=[
             "Jubilación",
             "Acumulación",
+            "Mixta (acumulación + jubilación)",
         ],
         index=0,
-        help="Jubilación: prioriza impuestos al retirar. Acumulación: prioriza impuestos antes de FIRE.",
+        help=(
+            "Jubilación: prioriza impuestos al retirar. "
+            "Acumulación: prioriza impuestos antes de FIRE. "
+            "Mixta: aplica ambos enfoques."
+        ),
         key="fiscal_priority_key",
     )
     intl_tax_rates: Dict[str, float] = {
@@ -3646,6 +4551,10 @@ def render_sidebar() -> Dict:
         "property_sale_improvement_costs": property_sale_improvement_costs,
         "property_sale_selling_costs": property_sale_selling_costs,
         "include_pension_in_simulation": include_pension_in_simulation,
+        "retirement_model_mode": retirement_model_mode,
+        "two_phase_switch_age": two_phase_switch_age,
+        "two_phase_withdrawal_stage1_net_annual": two_phase_withdrawal_stage1_net_annual,
+        "two_phase_withdrawal_stage2_net_annual": two_phase_withdrawal_stage2_net_annual,
         "two_stage_retirement_model": two_stage_retirement_model,
         "edad_pension_oficial": edad_pension_oficial,
         "edad_inicio_pension_publica": edad_inicio_pension_publica,
@@ -3822,7 +4731,7 @@ def render_kpis(simulation_results: Dict, params: Dict) -> None:
 def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
     """Render auditable tax trace for selected region/year."""
     if params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK) == FISCAL_MODE_INTL_BASIC:
-        if params.get("fiscal_priority") == "Jubilación" and params.get("retirement_tax_context"):
+        if params.get("fiscal_priority") in ("Jubilación", "Mixta (acumulación + jubilación)") and params.get("retirement_tax_context"):
             ctx = params["retirement_tax_context"]
             st.subheader("🧾 Resumen Fiscal Internacional (aproximación anual)")
             st.caption(
@@ -3844,7 +4753,7 @@ def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
     if not tax_pack or not params.get("region"):
         return
 
-    if params.get("fiscal_priority") == "Jubilación" and params.get("retirement_tax_context"):
+    if params.get("fiscal_priority") in ("Jubilación", "Mixta (acumulación + jubilación)") and params.get("retirement_tax_context"):
         ctx = params["retirement_tax_context"]
         gross_withdrawal = ctx["gross_withdrawal_required"]
         taxable_base = gross_withdrawal * params.get(
@@ -3901,13 +4810,23 @@ def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
                     params.get("taxable_withdrawal_ratio", 0.4),
                 )
             )
+            retirement_mode = params.get("retirement_model_mode", "SIMPLE_TWO_PHASE")
+            use_simple_two_phase = retirement_mode == "SIMPLE_TWO_PHASE"
             use_two_stage = bool(
-                params.get("two_stage_retirement_model", False)
-                and params.get("include_pension_in_simulation", False)
+                use_simple_two_phase
+                or (
+                    params.get("two_stage_retirement_model", False)
+                    and params.get("include_pension_in_simulation", False)
+                )
             )
             fire_age = int(params.get("edad_objetivo", 0))
             pension_start_age = int(
-                params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67))
+                params.get(
+                    "two_phase_switch_age",
+                    params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67)),
+                )
+                if use_simple_two_phase
+                else params.get("edad_inicio_pension_publica", params.get("edad_pension_oficial", 67))
             )
             private_start_age = int(params.get("edad_inicio_plan_privado", pension_start_age))
             private_duration = int(params.get("duracion_plan_privado_anos", 0))
@@ -3934,7 +4853,22 @@ def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
                 return income_public + income_private + income_other
 
             stage_rows: List[Dict[str, Any]] = []
-            if use_two_stage:
+            if use_two_stage and use_simple_two_phase:
+                stage1 = float(params.get("two_phase_withdrawal_stage1_net_annual", net_spending_base))
+                stage2 = float(params.get("two_phase_withdrawal_stage2_net_annual", net_spending_base))
+                stage_inputs = [
+                    (
+                        "Pre-pensión",
+                        stage1,
+                        0.0,
+                    ),
+                    (
+                        "Post-pensión",
+                        stage2,
+                        0.0,
+                    ),
+                ]
+            elif use_two_stage:
                 pre_extra = float(params.get("coste_pre_pension_anual", 0.0))
                 pre_general_income = income_general_for_age(fire_age)
                 post_general_income = income_general_for_age(max(fire_age, pension_start_age))
@@ -4387,7 +5321,7 @@ def render_success_distribution_chart(simulation_results: Dict, params: Dict) ->
 # 8. SENSITIVITY ANALYSIS - 5x5 MATRIX
 # =====================================================================
 
-def render_sensitivity_analysis(params: Dict) -> None:
+def render_sensitivity_analysis(simulation_results: Dict, params: Dict) -> None:
     """
     5x5 matrix: Returns vs Inflation scenarios.
     Shows impact on years to FIRE with color coding.
@@ -4411,75 +5345,166 @@ def render_sensitivity_analysis(params: Dict) -> None:
     base_inflation = params["inflacion"] * 100
     fire_target = params.get("fire_target_effective", params["gastos_anuales"] / params["safe_withdrawal_rate"])
     years_horizon = params["edad_objetivo"] - params["edad_actual"]
+    base_portfolio = float(params.get("patrimonio_base_simulacion", params["patrimonio_inicial"]))
+    contribution_growth_rate = float(params.get("contribution_growth_rate", 0.0))
 
     # Define matrix parameters
     return_offsets = [-2, -1, 0, 1, 2]  # % points
     inflation_offsets = [-2, -1, 0, 1, 2]  # % points
 
-    sensitivity_matrix = np.zeros((len(inflation_offsets), len(return_offsets)))
+    sensitivity_matrix = np.full((len(inflation_offsets), len(return_offsets)), np.nan)
     reachability_matrix = np.zeros((len(inflation_offsets), len(return_offsets)), dtype=bool)
+
+    fiscal_priority_mode = params.get("fiscal_priority")
+    use_accumulation_taxes = fiscal_priority_mode in ("Acumulación", "Mixta (acumulación + jubilación)")
+    tax_pack_for_sensitivity = None
+    if (
+        use_accumulation_taxes
+        and params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK) == FISCAL_MODE_ES_TAXPACK
+        and params.get("tax_year") is not None
+        and params.get("region")
+    ):
+        try:
+            tax_pack_for_sensitivity = load_tax_pack(int(params["tax_year"]), "es")
+        except Exception:
+            tax_pack_for_sensitivity = None
+
+    accumulation_sale_enabled = bool(
+        params.get("property_sale_enabled", False)
+        and params.get("property_sale_phase", "Acumulación") == "Acumulación"
+        and float(params.get("property_sale_amount_net", 0.0)) > 0
+    )
+    accumulation_sale_year = int(params.get("property_sale_year_accumulation", 0))
+    accumulation_sale_amount_net = float(params.get("property_sale_amount_net", 0.0))
+    accumulation_rental_drop_enabled = bool(
+        accumulation_sale_enabled and float(params.get("property_sale_rental_drop_annual", 0.0)) > 0
+    )
+    accumulation_rental_drop_year = accumulation_sale_year
+    accumulation_rental_drop_annual = float(params.get("property_sale_rental_drop_annual", 0.0))
+    annual_spending_for_target = float(params.get("annual_spending_for_target", params.get("gasto_anual_neto_cartera", params["gastos_anuales"])))
 
     for i, inf_offset in enumerate(inflation_offsets):
         for j, ret_offset in enumerate(return_offsets):
             test_return = (base_return + ret_offset) / 100
             test_inflation = (base_inflation + inf_offset) / 100
-
-            # Quick projection
-            portfolio = params["patrimonio_inicial"]
-            years_to_target = None
-
-            for year in range(1, years_horizon + 1):
-                portfolio = (
-                    portfolio * (1 + test_return)
-                    + params["aportacion_mensual"] * 12
-                )
-                real_portfolio = portfolio / ((1 + test_inflation) ** year)
-                if real_portfolio >= fire_target:
-                    years_to_target = year
-                    break
-
-            reachability_matrix[i, j] = years_to_target is not None
-            sensitivity_matrix[i, j] = (
-                years_to_target if years_to_target else years_horizon
+            cell_key = (
+                f"sens_mc_{params.get('patrimonio_base_simulacion')}_{params.get('aportacion_mensual_efectiva')}_{years_horizon}_"
+                f"{test_return}_{test_inflation}_{params['volatilidad']}_{params['safe_withdrawal_rate']}_{annual_spending_for_target}_"
+                f"{params.get('contribution_growth_rate', 0.0)}_{params.get('fiscal_priority')}_{params.get('fiscal_mode')}_{params.get('region')}_{params.get('tax_year')}_"
+                f"{accumulation_sale_enabled}_{accumulation_sale_year}_{accumulation_sale_amount_net}_{accumulation_rental_drop_enabled}_{accumulation_rental_drop_annual}"
             )
+            cell_result = run_cached_sensitivity_cell(
+                params_key=cell_key,
+                initial_wealth=base_portfolio,
+                monthly_contribution=float(params.get("aportacion_mensual_efectiva", params["aportacion_mensual"])),
+                years=years_horizon,
+                mean_return=test_return,
+                volatility=float(params["volatilidad"]),
+                inflation_rate=test_inflation,
+                annual_spending=annual_spending_for_target,
+                safe_withdrawal_rate=float(params["safe_withdrawal_rate"]),
+                contribution_growth_rate=contribution_growth_rate,
+                property_sale_enabled=accumulation_sale_enabled,
+                property_sale_year=accumulation_sale_year,
+                property_sale_amount=accumulation_sale_amount_net,
+                rental_drop_enabled=accumulation_rental_drop_enabled,
+                rental_drop_year=accumulation_rental_drop_year,
+                rental_drop_annual_amount=accumulation_rental_drop_annual,
+                tax_pack=tax_pack_for_sensitivity,
+                region=params.get("region"),
+            )
+            years_to_target = find_years_to_fire(
+                np.asarray(cell_result.get("real_percentile_50", []), dtype=float),
+                fire_target,
+            )
+            reachability_matrix[i, j] = years_to_target is not None
+            if years_to_target is not None:
+                sensitivity_matrix[i, j] = float(years_to_target)
 
-    # Create DataFrame for display
-    df_sensitivity = pd.DataFrame(
-        sensitivity_matrix,
-        index=[f"{inf:+.1f}%" for inf in inflation_offsets],
-        columns=[f"{ret:+.1f}%" for ret in return_offsets],
+    # Anchor the center cell to the active simulation (P50 real path) to avoid contradictions
+    # between matrix banner and the main scenario shown above.
+    center_i = inflation_offsets.index(0)
+    center_j = return_offsets.index(0)
+    base_years_to_fire_sim = find_years_to_fire(
+        np.asarray(simulation_results.get("real_percentile_50", []), dtype=float),
+        float(fire_target),
     )
+    if base_years_to_fire_sim is not None:
+        reachability_matrix[center_i, center_j] = True
+        sensitivity_matrix[center_i, center_j] = float(base_years_to_fire_sim)
+    else:
+        reachability_matrix[center_i, center_j] = False
+        sensitivity_matrix[center_i, center_j] = np.nan
 
     # Render as heatmap with improved color scaling (Z-score normalization for better contrast)
-    # Normalize matrix to [0, 1] for better color sensitivity
-    z_min = sensitivity_matrix.min()
-    z_max = sensitivity_matrix.max()
-    z_normalized = (sensitivity_matrix - z_min) / (z_max - z_min) if z_max > z_min else sensitivity_matrix
+    reached_scenarios = int(reachability_matrix.sum())
+    if reached_scenarios > 0:
+        z_min = float(np.nanmin(sensitivity_matrix))
+        z_max = float(np.nanmax(sensitivity_matrix))
+        z_values = sensitivity_matrix
+    else:
+        z_min = 0.0
+        z_max = 1.0
+        z_values = np.zeros_like(sensitivity_matrix, dtype=float)
+    text_matrix = np.where(reachability_matrix, np.char.add(np.char.mod("%.0f", np.nan_to_num(sensitivity_matrix, nan=0.0)), " años"), "No alcanza")
     
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=sensitivity_matrix,
-            x=[f"Renta {ret:+.0f}pp" for ret in return_offsets],
-            y=[f"Inflación {inf:+.0f}pp" for inf in inflation_offsets],
+    x_labels = [f"Renta {ret:+.0f}pp" for ret in return_offsets]
+    y_labels = [f"Inflación {inf:+.0f}pp" for inf in inflation_offsets]
+
+    fig = go.Figure()
+
+    # Layer 1: unreachable scenarios in neutral gray.
+    unreachable_layer = np.where(reachability_matrix, np.nan, 1.0)
+    fig.add_trace(
+        go.Heatmap(
+            z=unreachable_layer,
+            x=x_labels,
+            y=y_labels,
+            colorscale=[[0.0, "#eef2f7"], [1.0, "#eef2f7"]],
+            showscale=False,
+            text=np.where(reachability_matrix, "", "No alcanza"),
+            texttemplate="%{text}",
+            textfont={"size": 11, "color": "#5b6472"},
+            hovertemplate="<b>%{y}</b> · <b>%{x}</b><br>No alcanza<extra></extra>",
+            xgap=1,
+            ygap=1,
+        )
+    )
+
+    # Layer 2: reachable scenarios with intuitive green->amber->red scale.
+    reachable_layer = np.where(reachability_matrix, z_values, np.nan)
+    if reached_scenarios > 0 and z_max <= z_min:
+        zmax_reachable = z_min + 1.0
+    else:
+        zmax_reachable = z_max
+    fig.add_trace(
+        go.Heatmap(
+            z=reachable_layer,
+            x=x_labels,
+            y=y_labels,
             colorscale=[
-                [0, "rgb(46, 204, 113)"],  # Green
-                [0.5, "rgb(243, 156, 18)"],  # Orange
-                [1, "rgb(231, 76, 60)"],  # Red
+                [0.0, "rgb(46, 204, 113)"],   # green (faster FIRE)
+                [0.5, "rgb(243, 156, 18)"],   # amber
+                [1.0, "rgb(231, 76, 60)"],    # red (slower FIRE)
             ],
             zmin=z_min,
-            zmax=z_max,
-            text=np.round(sensitivity_matrix, 1),  # Display with 1 decimal for more granularity
-            texttemplate="%{text} años",
-            textfont={"size": 10},
+            zmax=zmax_reachable,
+            text=np.where(reachability_matrix, text_matrix, ""),
+            texttemplate="%{text}",
+            textfont={"size": 11, "color": "#1f2937"},
             colorbar=dict(title="Años a FIRE"),
+            hovertemplate="<b>%{y}</b> · <b>%{x}</b><br>%{text}<extra></extra>",
+            xgap=1,
+            ygap=1,
         )
     )
 
     fig.update_layout(
         title="<b>Matriz de Sensibilidad: Impacto en Timeline FIRE</b>",
-        height=400,
+        height=430,
         xaxis_title="Rentabilidad esperada",
         yaxis_title="Inflación esperada",
+        plot_bgcolor="white",
     )
 
     render_plotly_chart(fig, key="sensitivity_matrix_chart")
@@ -4488,21 +5513,24 @@ def render_sensitivity_analysis(params: Dict) -> None:
     sensitivity_col1, sensitivity_col2 = st.columns(2)
     
     with sensitivity_col1:
-        min_years = sensitivity_matrix.min()
-        max_years = sensitivity_matrix.max()
+        min_years = float(np.nanmin(sensitivity_matrix)) if reached_scenarios else float("nan")
+        max_years = float(np.nanmax(sensitivity_matrix)) if reached_scenarios else float("nan")
         range_years = max_years - min_years
         total_scenarios = sensitivity_matrix.size
-        reached_scenarios = int(reachability_matrix.sum())
-        center_i = inflation_offsets.index(0)
-        center_j = return_offsets.index(0)
         base_reachable = bool(reachability_matrix[center_i, center_j])
         
         with st.expander("📊 Interpretación de resultados", expanded=False):
-            st.write(
-                f"**Rango observado:** {min_years:.0f} a {max_years:.0f} años (~{range_years:.0f} años de variación)"
-            )
+            if reached_scenarios > 0:
+                st.write(
+                    f"**Rango observado (solo alcanzables):** {min_years:.0f} a {max_years:.0f} años (~{range_years:.0f} años de variación)"
+                )
+            else:
+                st.write("**Rango observado:** sin escenarios alcanzables en el horizonte actual.")
             st.write(
                 f"**Escenarios alcanzables en la matriz:** {reached_scenarios}/{total_scenarios}"
+            )
+            st.write(
+                "Nota: la celda central (Renta +0pp / Inflación +0pp) está anclada al resultado base de la simulación activa."
             )
             st.write(
                 "**Verde (<15 años):** Escenario optimista - Alcanzable en corto plazo"
@@ -4546,6 +5574,11 @@ def render_sensitivity_analysis(params: Dict) -> None:
                 f"⚠️ **Alta sensibilidad.** Tu plan varía {range_years:.1f} años según escenarios. "
                 f"Considera aumentar ahorros para menos dependencia de mercados optimistas."
             )
+
+    st.caption(
+        "La matriz es una aproximación determinista para variaciones +/-2pp. "
+        "La celda central se alinea con la simulación activa para evitar inconsistencias de lectura."
+    )
 
 
 # =====================================================================
@@ -4942,7 +5975,11 @@ def main():
             except Exception:
                 tax_pack_for_run = None
 
-        if params.get("fiscal_priority") == "Jubilación":
+        fiscal_priority_mode = params.get("fiscal_priority")
+        use_retirement_focus = fiscal_priority_mode in ("Jubilación", "Mixta (acumulación + jubilación)")
+        use_accumulation_taxes = fiscal_priority_mode in ("Acumulación", "Mixta (acumulación + jubilación)")
+
+        if use_retirement_focus:
             if params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK) == FISCAL_MODE_INTL_BASIC:
                 retirement_ctx = estimate_retirement_tax_context_intl_basic(
                     net_spending=params.get("gasto_anual_neto_cartera", params["gastos_anuales"]),
@@ -4961,12 +5998,12 @@ def main():
             params["retirement_tax_context"] = retirement_ctx
             annual_spending_for_target = retirement_ctx["gross_withdrawal_required"]
             params["fire_target_effective"] = retirement_ctx["target_portfolio_gross"]
-            tax_pack_accumulation = None
+            tax_pack_accumulation = tax_pack_for_run if use_accumulation_taxes else None
         else:
             params["retirement_tax_context"] = None
             annual_spending_for_target = params.get("gasto_anual_neto_cartera", params["gastos_anuales"])
             params["fire_target_effective"] = annual_spending_for_target / params["safe_withdrawal_rate"]
-            tax_pack_accumulation = tax_pack_for_run
+            tax_pack_accumulation = tax_pack_for_run if use_accumulation_taxes else None
 
         if accumulation_sale_enabled_for_target:
             annual_spending_for_target = max(
@@ -5132,7 +6169,7 @@ def main():
     st.divider()
 
     # 5. RENDER SENSITIVITY ANALYSIS
-    render_sensitivity_analysis(params)
+    render_sensitivity_analysis(simulation_results, params)
 
     st.divider()
 

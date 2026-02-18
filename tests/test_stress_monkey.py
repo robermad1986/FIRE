@@ -34,6 +34,7 @@ from src.calculator import (
     calculate_market_scenarios,
     calculate_net_worth,
 )
+from src.retirement_models import build_decumulation_table_two_phase_net_withdrawal
 
 
 # ============================================================================
@@ -995,6 +996,57 @@ class TestMonkeyHandsComparativeFuzzing:
 # ============================================================================
 
 @pytest.mark.stress
+def test_stress_two_phase_decumulation_invariants() -> None:
+    """Randomized stress for simple two-phase retirement invariants."""
+    pytest.importorskip("pandas")
+    random.seed(20260218)
+
+    for _ in range(120):
+        fire_age = random.randint(45, 65)
+        years = random.randint(10, 35)
+        phase2_age = random.randint(fire_age, min(90, fire_age + 20))
+        stage1 = random.uniform(12_000, 90_000)
+        stage2 = random.uniform(0, stage1)
+        inflation = random.uniform(-0.01, 0.06)
+        tax_rate = random.uniform(0.0, 0.30)
+        start_capital = random.uniform(50_000, 5_000_000)
+        returns = [random.uniform(-0.35, 0.30) for _ in range(years)]
+
+        df = build_decumulation_table_two_phase_net_withdrawal(
+            starting_portfolio=start_capital,
+            fire_age=fire_age,
+            years_in_retirement=years,
+            phase2_start_age=phase2_age,
+            stage1_net_withdrawal_annual=stage1,
+            stage2_net_withdrawal_annual=stage2,
+            inflation_rate=inflation,
+            tax_rate_on_gains=tax_rate,
+            annual_returns_sequence=returns,
+        )
+
+        assert len(df) == years
+        for _, row in df.iterrows():
+            # Finite and non-negative invariants
+            assert math.isfinite(float(row["Capital inicial (€)"]))
+            assert math.isfinite(float(row["Retirada anual (€)"]))
+            assert math.isfinite(float(row["Crecimiento neto (€)"]))
+            assert math.isfinite(float(row["Capital final (€)"]))
+            assert float(row["Retirada anual (€)"]) >= 0.0
+            assert float(row["Capital final (€)"]) >= 0.0
+            # Accounting identity per row
+            lhs = (
+                float(row["Capital inicial (€)"])
+                + float(row["Crecimiento neto (€)"])
+                - float(row["Retirada anual (€)"])
+            )
+            assert float(row["Capital final (€)"]) == pytest.approx(max(0.0, lhs), rel=1e-9, abs=1e-6)
+
+            # Stage transition consistency
+            expected_stage = "Post-pensión" if int(row["Edad"]) >= phase2_age else "Pre-pensión"
+            assert str(row["Tramo"]) == expected_stage
+
+
+@pytest.mark.stress
 def test_monkey_stress_final_summary() -> None:
     """
     Comprehensive summary of extreme stress testing.
@@ -1132,4 +1184,3 @@ def test_monkey_stress_final_summary() -> None:
     
     print(summary)
     assert True  # Documentation test always passes
-

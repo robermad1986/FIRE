@@ -51,6 +51,7 @@ The source code is available on GitHub: [robermad1986/FIRE](https://github.com/r
 - **📈 KPIs Profesionales** — FIRE Number, Net Worth, Burning Rate, Savings Rate
 - **💵 Fiscalidad EUR/UCITS** — Impuestos sobre plusvalías, dividendos, intereses
 - **🎯 Enfoque Fiscal Flexible** — Prioriza acumulación o jubilación en la estimación del objetivo FIRE
+- **🧓 Retiro en 2 fases (simple por defecto)** — Define retirada neta pre-pensión y post-pensión sin obligar desglose de plan privado
 - **🎓 Explicaciones Contextuales** — Cada parámetro con ejemplos y consejos
 - **🌍 Soporte Multi-País** — Ajusta impuestos para tu país específico
 

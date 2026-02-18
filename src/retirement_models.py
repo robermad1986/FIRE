@@ -214,3 +214,103 @@ def build_decumulation_table_two_stage_schedule(
         raise RuntimeError("pandas is required to build decumulation tables.") from exc
 
     return pd.DataFrame(rows)
+
+
+def build_decumulation_table_two_phase_net_withdrawal(
+    starting_portfolio: float,
+    fire_age: int,
+    years_in_retirement: int,
+    phase2_start_age: int,
+    stage1_net_withdrawal_annual: float,
+    stage2_net_withdrawal_annual: float,
+    inflation_rate: float,
+    tax_rate_on_gains: float,
+    expected_return: Optional[float] = None,
+    annual_returns_sequence: Optional[Any] = None,
+    annual_mortgage_schedule: Optional[list] = None,
+    pending_installments_end_schedule: Optional[list] = None,
+    property_sale_enabled: bool = False,
+    property_sale_year: int = 0,
+    property_sale_amount: float = 0.0,
+    annual_extra_withdrawal_schedule: Optional[list] = None,
+) -> Any:
+    """Two-phase decumulation with direct net withdrawals from portfolio.
+
+    This model is intentionally simple: user defines required net withdrawal from
+    portfolio in stage 1 (pre-pension bridge) and stage 2 (post-pension).
+    """
+    rows = []
+    portfolio = float(max(0.0, starting_portfolio))
+    inflation_factor = 1.0
+
+    for year in range(1, years_in_retirement + 1):
+        age = fire_age + year - 1
+        is_stage_2 = age >= int(phase2_start_age)
+        tramo = "Post-pensión" if is_stage_2 else "Pre-pensión"
+        base_today = (
+            max(0.0, float(stage2_net_withdrawal_annual))
+            if is_stage_2
+            else max(0.0, float(stage1_net_withdrawal_annual))
+        )
+
+        annual_return = (
+            float(annual_returns_sequence[year - 1])
+            if annual_returns_sequence is not None and year - 1 < len(annual_returns_sequence)
+            else float(expected_return or 0.0)
+        )
+
+        annual_mortgage_cost = 0.0
+        if annual_mortgage_schedule and year - 1 < len(annual_mortgage_schedule):
+            annual_mortgage_cost = max(0.0, float(annual_mortgage_schedule[year - 1]))
+        annual_extra_withdrawal = 0.0
+        if annual_extra_withdrawal_schedule and year - 1 < len(annual_extra_withdrawal_schedule):
+            annual_extra_withdrawal = max(0.0, float(annual_extra_withdrawal_schedule[year - 1]))
+        pending_installments_end_year = 0
+        if pending_installments_end_schedule and year - 1 < len(pending_installments_end_schedule):
+            pending_installments_end_year = max(0, int(pending_installments_end_schedule[year - 1]))
+
+        sale_nominal = (
+            max(0.0, float(property_sale_amount)) * inflation_factor
+            if property_sale_enabled and int(property_sale_year) == year
+            else 0.0
+        )
+        capital_inicial = portfolio + sale_nominal
+        retirada_base = base_today * inflation_factor
+        retirada = retirada_base + annual_mortgage_cost + annual_extra_withdrawal
+        growth_gross = capital_inicial * annual_return
+        tax_growth = max(0.0, growth_gross) * max(0.0, tax_rate_on_gains)
+        growth_net = growth_gross - tax_growth
+        capital_final = max(0.0, capital_inicial + growth_net - retirada)
+
+        rows.append(
+            {
+                "Año jubilación": year,
+                "Edad": age,
+                "Tramo": tramo,
+                "Necesidad base cartera (€)": retirada_base,
+                "Ingreso pensión pública (€)": 0.0,
+                "Ingreso plan privado (€)": 0.0,
+                "Otras rentas (€)": 0.0,
+                "Ingresos totales (€)": 0.0,
+                "Coste extra pre-pensión (€)": 0.0,
+                "Ajuste venta/alquiler (€)": annual_extra_withdrawal,
+                "Venta inmueble (€)": sale_nominal,
+                "Cuota hipoteca pendiente (€)": annual_mortgage_cost,
+                "Cuotas pendientes fin año": pending_installments_end_year,
+                "Capital inicial (€)": capital_inicial,
+                "Retirada anual (€)": retirada,
+                "Crecimiento neto (€)": growth_net,
+                "Capital final (€)": capital_final,
+                "Capital agotado": capital_final <= 0,
+            }
+        )
+
+        portfolio = capital_final
+        inflation_factor *= (1 + inflation_rate)
+
+    try:
+        import pandas as pd  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("pandas is required to build decumulation tables.") from exc
+
+    return pd.DataFrame(rows)

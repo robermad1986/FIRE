@@ -57,6 +57,9 @@ Desplegar en **Streamlit Cloud** con un solo click: [Abrir en línea]() *(en des
 - Ajustes de contraste para tarjetas en dark mode móvil.
 - Modo fiscal `Internacional básico` para ahorradores con domicilio fiscal fuera de España (aproximación).
 - Exportación ampliada: CSV + JSON de escenario + botón nativo de impresión/PDF del navegador.
+- Nuevo modelo de retiro por defecto `Simple (2 fases)`:
+  - fase 1 (pre-pensión) y fase 2 (post-pensión) por retirada neta desde cartera,
+  - modo avanzado opcional para desglose de pensión pública/plan privado/otras rentas.
 
 ### 1. **Panel de Control Interactivo (Sidebar)**
 Configura tu perfil en tiempo real:

@@ -6,6 +6,7 @@ from src.retirement_models import (
     calculate_effective_public_pension_annual,
     estimate_retirement_tax_context,
     estimate_auto_taxable_withdrawal_ratio,
+    build_decumulation_table_two_phase_net_withdrawal,
     build_decumulation_table_two_stage_schedule,
 )
 from src.tax_engine import load_tax_pack
@@ -200,3 +201,78 @@ def test_two_stage_schedule_withdrawal_identity_holds():
             - float(row["Ingresos totales (€)"]),
         ) + float(row["Cuota hipoteca pendiente (€)"]) + float(row["Ajuste venta/alquiler (€)"])
         assert float(row["Retirada anual (€)"]) == pytest.approx(expected)
+
+
+def test_simple_two_phase_switch_applies_correct_withdrawals():
+    pytest.importorskip("pandas")
+    df = build_decumulation_table_two_phase_net_withdrawal(
+        starting_portfolio=500_000,
+        fire_age=60,
+        years_in_retirement=5,
+        phase2_start_age=63,
+        stage1_net_withdrawal_annual=36_000,
+        stage2_net_withdrawal_annual=12_000,
+        inflation_rate=0.0,
+        tax_rate_on_gains=0.0,
+        expected_return=0.0,
+    )
+    # Ages 60-62: stage 1. Ages 63+: stage 2.
+    assert df.iloc[0]["Tramo"] == "Pre-pensión"
+    assert df.iloc[2]["Tramo"] == "Pre-pensión"
+    assert df.iloc[3]["Tramo"] == "Post-pensión"
+    assert df.iloc[0]["Retirada anual (€)"] == pytest.approx(36_000.0)
+    assert df.iloc[3]["Retirada anual (€)"] == pytest.approx(12_000.0)
+
+
+def test_simple_two_phase_inflation_indexing():
+    pytest.importorskip("pandas")
+    df = build_decumulation_table_two_phase_net_withdrawal(
+        starting_portfolio=300_000,
+        fire_age=55,
+        years_in_retirement=3,
+        phase2_start_age=80,
+        stage1_net_withdrawal_annual=10_000,
+        stage2_net_withdrawal_annual=0,
+        inflation_rate=0.02,
+        tax_rate_on_gains=0.0,
+        expected_return=0.0,
+    )
+    assert df.iloc[0]["Necesidad base cartera (€)"] == pytest.approx(10_000.0)
+    assert df.iloc[1]["Necesidad base cartera (€)"] == pytest.approx(10_200.0)
+    assert df.iloc[2]["Necesidad base cartera (€)"] == pytest.approx(10_404.0)
+
+
+def test_simple_two_phase_bridge_survival_flag():
+    pytest.importorskip("pandas")
+    df = build_decumulation_table_two_phase_net_withdrawal(
+        starting_portfolio=100_000,
+        fire_age=60,
+        years_in_retirement=4,
+        phase2_start_age=64,
+        stage1_net_withdrawal_annual=40_000,
+        stage2_net_withdrawal_annual=5_000,
+        inflation_rate=0.0,
+        tax_rate_on_gains=0.0,
+        expected_return=0.0,
+    )
+    # 100k - 40k - 40k - 40k => depletes within bridge.
+    assert bool(df["Capital agotado"].any())
+
+
+def test_simple_two_phase_with_backtesting_path():
+    pytest.importorskip("pandas")
+    df = build_decumulation_table_two_phase_net_withdrawal(
+        starting_portfolio=200_000,
+        fire_age=60,
+        years_in_retirement=3,
+        phase2_start_age=62,
+        stage1_net_withdrawal_annual=20_000,
+        stage2_net_withdrawal_annual=10_000,
+        inflation_rate=0.0,
+        tax_rate_on_gains=0.0,
+        annual_returns_sequence=[0.10, -0.20, 0.05],
+    )
+    # Year 1: 200k*1.10 -20k = 200k ; Year 2: 200k*0.80 -20k = 140k ; Year 3: 140k*1.05 -10k = 137k
+    assert df.iloc[0]["Capital final (€)"] == pytest.approx(200_000.0)
+    assert df.iloc[1]["Capital final (€)"] == pytest.approx(140_000.0)
+    assert df.iloc[2]["Capital final (€)"] == pytest.approx(137_000.0)

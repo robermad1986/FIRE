@@ -6,6 +6,7 @@ from src.retirement_models import (
     calculate_effective_public_pension_annual,
     estimate_retirement_tax_context,
     estimate_auto_taxable_withdrawal_ratio,
+    resolve_retirement_net_spending,
     build_decumulation_table_two_phase_net_withdrawal,
     build_decumulation_table_two_stage_schedule,
     build_template_window_indices,
@@ -73,6 +74,30 @@ def test_retirement_tax_context_with_pack_adds_tax_drag():
     assert ctx["target_portfolio_gross"] > ctx["base_target"]
     assert ctx["gross_withdrawal_required"] >= 40_000
     assert ctx["iterations"] >= 1
+
+
+def test_resolve_retirement_net_spending_uses_stage1_in_simple_mode():
+    value = resolve_retirement_net_spending(
+        {
+            "retirement_model_mode": "SIMPLE_TWO_PHASE",
+            "gastos_anuales": 45_000,
+            "gasto_anual_neto_cartera": 0,
+            "two_phase_withdrawal_stage1_net_annual": 25_000,
+        }
+    )
+    assert value == pytest.approx(25_000.0)
+
+
+def test_resolve_retirement_net_spending_uses_gasto_neto_in_advanced_mode():
+    value = resolve_retirement_net_spending(
+        {
+            "retirement_model_mode": "ADVANCED_INCOME_BREAKDOWN",
+            "gastos_anuales": 45_000,
+            "gasto_anual_neto_cartera": 18_500,
+            "two_phase_withdrawal_stage1_net_annual": 30_000,
+        }
+    )
+    assert value == pytest.approx(18_500.0)
 
 
 def test_auto_taxable_ratio_is_bounded():

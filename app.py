@@ -57,6 +57,7 @@ from src.retirement_models import (
     calculate_effective_public_pension_annual,
     estimate_retirement_tax_context as estimate_retirement_tax_context_core,
     estimate_auto_taxable_withdrawal_ratio as estimate_auto_taxable_withdrawal_ratio_core,
+    resolve_retirement_net_spending as resolve_retirement_net_spending_core,
     build_decumulation_table_two_stage_schedule as build_decumulation_table_two_stage_schedule_core,
     build_decumulation_table_two_phase_net_withdrawal as build_decumulation_table_two_phase_net_withdrawal_core,
     DECUM_BACKTEST_WINDOW_TEMPLATES,
@@ -70,6 +71,12 @@ from src.profile_io import (
     serialize_unified_bundle,
     derive_simple_two_phase_from_legacy,
     SIMPLE_TWO_PHASE_MIN_POST_PENSION_INCOME,
+)
+from src.profile_presets import (
+    get_fire_profile_options,
+    get_fire_profile_fallback,
+    apply_fire_profile_template_to_state,
+    PROFILE_MODE_LABEL,
 )
 from src.fiscal_modes import (
     FISCAL_MODE_ES_TAXPACK,
@@ -1457,7 +1464,10 @@ def render_retirement_tax_focus_summary(params: Dict) -> None:
         st.caption(
             "Este bloque prioriza impuestos durante la jubilación (retiros), no la acumulación previa."
         )
-    net_spending_for_portfolio = params.get("gasto_anual_neto_cartera", params["gastos_anuales"])
+    net_spending_for_portfolio = params.get(
+        "retirement_net_spending_for_tax",
+        params.get("gasto_anual_neto_cartera", params["gastos_anuales"]),
+    )
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Gasto neto deseado", f"{fmt_eur(net_spending_for_portfolio)}")
     col2.metric("Retirada bruta estimada", f"{fmt_eur(ctx['gross_withdrawal_required'])}")
@@ -1476,14 +1486,20 @@ def render_retirement_tax_focus_summary(params: Dict) -> None:
         "Referencia de fórmula: objetivo base = gasto neto / SWR. Al subir SWR, ese objetivo base baja; "
         "el ajuste fiscal puede suavizar esa caída, pero no invertirla en condiciones normales."
     )
-    if params.get("renta_neta_alquiler_anual_efectiva", 0) > 0:
+    is_simple_two_phase = str(params.get("retirement_model_mode", "SIMPLE_TWO_PHASE")) == "SIMPLE_TWO_PHASE"
+    if is_simple_two_phase:
         st.caption(
-            f"Ingreso alquiler considerado: {fmt_eur(params['renta_neta_alquiler_anual_efectiva'])}/año."
+            "Modo simple activo: este objetivo fiscal usa la retirada neta fase 1 definida en el panel de retiro."
         )
-    if params.get("ahorro_vivienda_habitual_anual_efectivo", 0) > 0:
-        st.caption(
-            f"Ahorro anual por vivienda habitual considerado: {fmt_eur(params['ahorro_vivienda_habitual_anual_efectivo'])}/año."
-        )
+    else:
+        if params.get("renta_neta_alquiler_anual_efectiva", 0) > 0:
+            st.caption(
+                f"Ingreso alquiler considerado: {fmt_eur(params['renta_neta_alquiler_anual_efectiva'])}/año."
+            )
+        if params.get("ahorro_vivienda_habitual_anual_efectivo", 0) > 0:
+            st.caption(
+                f"Ahorro anual por vivienda habitual considerado: {fmt_eur(params['ahorro_vivienda_habitual_anual_efectivo'])}/año."
+            )
 
 
 def build_decumulation_table(
@@ -3540,6 +3556,54 @@ def render_sidebar() -> Dict:
 
     loaded_profile_config = st.session_state.get("loaded_profile_config", {})
     loaded_profile_warnings = st.session_state.get("loaded_profile_warnings", [])
+    suggested_sync_keys = (
+        "two_phase_switch_age_last_suggested_key",
+        "two_phase_stage1_last_suggested_key",
+        "two_phase_post_income_last_suggested_key",
+        "two_phase_switch_age_manual_override_key",
+        "two_phase_stage1_manual_override_key",
+        "two_phase_post_income_manual_override_key",
+    )
+
+    def _clear_suggested_sync_state() -> None:
+        """Reset autosync trackers so they are re-based on next render."""
+        for key in suggested_sync_keys:
+            st.session_state.pop(key, None)
+
+    def _mark_manual_override(flag_key: str) -> None:
+        """Mark a simple two-phase control as user-locked (no autosync)."""
+        st.session_state[flag_key] = True
+
+    def _sync_suggested_state(
+        *,
+        widget_key: str,
+        suggested_key: str,
+        suggested_value: float,
+        manual_override_key: Optional[str] = None,
+        is_int: bool = False,
+        tolerance: float = 1e-6,
+    ) -> None:
+        """Keep derived field synced to suggestion unless user has manually overridden it."""
+        if is_int:
+            cast = lambda x: int(float(x))
+            equal = lambda a, b: int(a) == int(b)
+        else:
+            cast = float
+            equal = lambda a, b: abs(float(a) - float(b)) < tolerance
+
+        current_value = cast(st.session_state.get(widget_key, suggested_value))
+        if manual_override_key and bool(st.session_state.get(manual_override_key, False)):
+            st.session_state[suggested_key] = cast(suggested_value)
+            return
+        if suggested_key not in st.session_state:
+            # First render: establish baseline without forcing a write.
+            st.session_state[suggested_key] = current_value
+            return
+
+        prev_suggested = cast(st.session_state.get(suggested_key, suggested_value))
+        if equal(current_value, prev_suggested):
+            st.session_state[widget_key] = cast(suggested_value)
+        st.session_state[suggested_key] = cast(suggested_value)
 
     def apply_loaded_profile_to_widget_state(config: Dict[str, Any]) -> None:
         """Map profile config keys to widget state keys so controls reflect loaded JSON."""
@@ -3722,6 +3786,7 @@ def render_sidebar() -> Dict:
                     try:
                         payload = json.loads(profile_file.read().decode("utf-8"))
                         safe_cfg, warnings_profile = deserialize_profile(payload)
+                        _clear_suggested_sync_state()
                         st.session_state["loaded_profile_config"] = safe_cfg
                         st.session_state["loaded_profile_warnings"] = warnings_profile
                         apply_loaded_profile_to_widget_state(safe_cfg)
@@ -3735,6 +3800,7 @@ def render_sidebar() -> Dict:
                     st.warning("Selecciona un archivo JSON antes de aplicar.")
         with col_clear_profile:
             if st.button("Limpiar perfil", key="clear_profile_button", width="stretch"):
+                _clear_suggested_sync_state()
                 st.session_state.pop("loaded_profile_config", None)
                 st.session_state.pop("loaded_profile_warnings", None)
                 loaded_profile_config = {}
@@ -3752,6 +3818,40 @@ def render_sidebar() -> Dict:
 
     # STEP 1: Experience and setup mode
     st.sidebar.markdown("### 1) Configuración inicial")
+
+    fire_profile_options = get_fire_profile_options(WEB_PROFILES)
+    fire_profile_fallback = get_fire_profile_fallback(WEB_PROFILES)
+
+    def _apply_fire_profile_template(profile_label: Optional[str] = None) -> None:
+        """Apply selected FIRE profile defaults into widget state."""
+        selected = profile_label or str(st.session_state.get("profile_name_key", fire_profile_fallback))
+        apply_fire_profile_template_to_state(
+            session_state=st.session_state,
+            web_profiles=WEB_PROFILES,
+            selected_profile=selected,
+            # Avoid writing widget selection key after selectbox instantiation.
+            update_profile_name_key=False,
+        )
+
+    def _on_setup_mode_change() -> None:
+        mode = str(st.session_state.get("setup_mode_key", "Personalizado"))
+        if mode != PROFILE_MODE_LABEL:
+            return
+        if st.session_state.get("profile_name_key") not in fire_profile_options:
+            st.session_state["profile_name_key"] = fire_profile_fallback
+        _apply_fire_profile_template()
+
+    def _on_profile_name_change() -> None:
+        if str(st.session_state.get("setup_mode_key", "Personalizado")) != PROFILE_MODE_LABEL:
+            return
+        _apply_fire_profile_template()
+
+    def _on_apply_profile_defaults_change() -> None:
+        if str(st.session_state.get("setup_mode_key", "Personalizado")) != PROFILE_MODE_LABEL:
+            return
+        if bool(st.session_state.get("apply_profile_defaults_key", False)):
+            _apply_fire_profile_template()
+
     modo_guiado = st.sidebar.checkbox(
         "Modo guiado (explicaciones simples)",
         value=True,
@@ -3760,8 +3860,9 @@ def render_sidebar() -> Dict:
     )
     setup_mode = st.sidebar.radio(
         "¿Cómo quieres configurar?",
-        options=["Perfil FIRE", "Personalizado"],
+        options=[PROFILE_MODE_LABEL, "Personalizado"],
         key="setup_mode_key",
+        on_change=_on_setup_mode_change,
         help="Perfil FIRE aplica una plantilla inicial; Personalizado deja todo manual.",
     )
 
@@ -3773,27 +3874,33 @@ def render_sidebar() -> Dict:
         "inflacion": 0.025,
         "safe_withdrawal_rate": 0.04,
     }
-    if setup_mode == "Perfil FIRE":
+    if setup_mode == PROFILE_MODE_LABEL:
+        if st.session_state.get("profile_name_key") not in fire_profile_options:
+            st.session_state["profile_name_key"] = fire_profile_fallback
         profile_name = st.sidebar.selectbox(
             "Perfil FIRE",
-            options=[p for p in WEB_PROFILES.keys() if p != "Personalizado"],
+            options=fire_profile_options,
             key="profile_name_key",
+            on_change=_on_profile_name_change,
             help="Plantilla con valores sugeridos para gastos, retorno, inflación y SWR.",
         )
         apply_profile_defaults = st.sidebar.checkbox(
             "Bloquear parámetros del perfil",
             value=True,
             key="apply_profile_defaults_key",
+            on_change=_on_apply_profile_defaults_change,
             help="Si está activo, esos parámetros quedan en modo solo lectura.",
         )
         profile_defaults = WEB_PROFILES[profile_name] or profile_defaults
+        if apply_profile_defaults and st.session_state.get("fire_profile_last_applied_key") != profile_name:
+            _apply_fire_profile_template(profile_name)
 
     if modo_guiado:
         st.sidebar.caption(
             "Consejo: empieza con valores aproximados y cambia una variable cada vez."
         )
 
-    lock_profile_fields = setup_mode == "Perfil FIRE" and apply_profile_defaults
+    lock_profile_fields = setup_mode == PROFILE_MODE_LABEL and apply_profile_defaults
 
     st.sidebar.divider()
 
@@ -4435,6 +4542,36 @@ def render_sidebar() -> Dict:
             st.caption(
                 "Modo simple: cartera unificada. Define el puente pre‑pensión y la pensión/rentas post‑pensión."
             )
+            phase2_age_key = "two_phase_switch_age_key"
+            phase2_age_suggest_key = "two_phase_switch_age_last_suggested_key"
+            phase2_age_manual_key = "two_phase_switch_age_manual_override_key"
+            post_income_key = "two_phase_post_pension_income_annual_key"
+            post_income_suggest_key = "two_phase_post_income_last_suggested_key"
+            post_income_manual_key = "two_phase_post_income_manual_override_key"
+            stage1_key = "two_phase_withdrawal_stage1_net_annual_key"
+            stage1_suggest_key = "two_phase_stage1_last_suggested_key"
+            stage1_manual_key = "two_phase_stage1_manual_override_key"
+            # Autosync derived controls unless manually overridden.
+            _sync_suggested_state(
+                widget_key=phase2_age_key,
+                suggested_key=phase2_age_suggest_key,
+                suggested_value=float(default_phase2_age),
+                manual_override_key=phase2_age_manual_key,
+                is_int=True,
+            )
+            _sync_suggested_state(
+                widget_key=stage1_key,
+                suggested_key=stage1_suggest_key,
+                suggested_value=float(default_stage1),
+                manual_override_key=stage1_manual_key,
+            )
+            _sync_suggested_state(
+                widget_key=post_income_key,
+                suggested_key=post_income_suggest_key,
+                suggested_value=float(default_post_pension_income),
+                manual_override_key=post_income_manual_key,
+            )
+
             two_phase_switch_age = st.slider(
                 "Edad de inicio fase 2 (post-pensión)",
                 min_value=50,
@@ -4442,6 +4579,8 @@ def render_sidebar() -> Dict:
                 value=max(50, min(100, default_phase2_age)),
                 step=1,
                 key="two_phase_switch_age_key",
+                on_change=_mark_manual_override,
+                args=(phase2_age_manual_key,),
             )
             two_phase_withdrawal_stage1_net_annual = float(
                 st.number_input(
@@ -4451,7 +4590,12 @@ def render_sidebar() -> Dict:
                     value=int(default_stage1),
                     step=1_000,
                     key="two_phase_withdrawal_stage1_net_annual_key",
+                    on_change=_mark_manual_override,
+                    args=(stage1_manual_key,),
                 )
+            )
+            st.caption(
+                "Fase 1, edad de fase 2 e ingreso post‑pensión se sincronizan con valores sugeridos mientras no los modifiques manualmente."
             )
             two_phase_post_pension_income_annual = float(
                 st.number_input(
@@ -4462,8 +4606,18 @@ def render_sidebar() -> Dict:
                     step=1_000,
                     key="two_phase_post_pension_income_annual_key",
                     help="Incluye solo ingresos externos a la cartera (pensión pública, plan privado, alquileres u otras rentas). No incluye retiradas de cartera.",
+                    on_change=_mark_manual_override,
+                    args=(post_income_manual_key,),
                 )
             )
+            if st.button("Re-sincronizar con sugeridos", key="simple_two_phase_resync_button", width="stretch"):
+                st.session_state[phase2_age_manual_key] = False
+                st.session_state[stage1_manual_key] = False
+                st.session_state[post_income_manual_key] = False
+                st.session_state.pop(phase2_age_suggest_key, None)
+                st.session_state.pop(stage1_suggest_key, None)
+                st.session_state.pop(post_income_suggest_key, None)
+                st.rerun()
             st.caption(
                 "Este importe **no** incluye retiradas de cartera: solo pensión y otras rentas netas esperadas."
             )
@@ -5247,7 +5401,12 @@ def render_tax_trace(params: Dict, tax_pack: Optional[Dict]) -> None:
             )
 
         with st.expander("Ver detalle anual por tramos (bases separadas)", expanded=False):
-            net_spending_base = float(params.get("gasto_anual_neto_cartera", params["gastos_anuales"]))
+            net_spending_base = float(
+                params.get(
+                    "retirement_net_spending_for_tax",
+                    params.get("gasto_anual_neto_cartera", params["gastos_anuales"]),
+                )
+            )
             taxable_ratio = float(
                 params.get(
                     "taxable_withdrawal_ratio_effective",
@@ -6422,18 +6581,25 @@ def main():
         fiscal_priority_mode = params.get("fiscal_priority")
         use_retirement_focus = fiscal_priority_mode in ("Jubilación", "Mixta (acumulación + jubilación)")
         use_accumulation_taxes = fiscal_priority_mode in ("Acumulación", "Mixta (acumulación + jubilación)")
+        net_spending_for_retirement_tax = resolve_retirement_net_spending_core(params)
+        if accumulation_sale_enabled_for_target:
+            net_spending_for_retirement_tax = max(
+                0.0,
+                float(net_spending_for_retirement_tax) + float(property_sale_total_drop_annual_today),
+            )
+        params["retirement_net_spending_for_tax"] = net_spending_for_retirement_tax
 
         if use_retirement_focus:
             if params.get("fiscal_mode", FISCAL_MODE_ES_TAXPACK) == FISCAL_MODE_INTL_BASIC:
                 retirement_ctx = estimate_retirement_tax_context_intl_basic(
-                    net_spending=params.get("gasto_anual_neto_cartera", params["gastos_anuales"]),
+                    net_spending=net_spending_for_retirement_tax,
                     safe_withdrawal_rate=params["safe_withdrawal_rate"],
                     taxable_withdrawal_ratio=params.get("taxable_withdrawal_ratio_effective", 0.4),
                     intl_tax_rates=params.get("intl_tax_rates", {}),
                 )
             else:
                 retirement_ctx = estimate_retirement_tax_context(
-                    net_spending=params.get("gasto_anual_neto_cartera", params["gastos_anuales"]),
+                    net_spending=net_spending_for_retirement_tax,
                     safe_withdrawal_rate=params["safe_withdrawal_rate"],
                     taxable_withdrawal_ratio=params.get("taxable_withdrawal_ratio_effective", 0.4),
                     tax_pack=tax_pack_for_run,
@@ -6445,16 +6611,9 @@ def main():
             tax_pack_accumulation = tax_pack_for_run if use_accumulation_taxes else None
         else:
             params["retirement_tax_context"] = None
-            annual_spending_for_target = params.get("gasto_anual_neto_cartera", params["gastos_anuales"])
+            annual_spending_for_target = net_spending_for_retirement_tax
             params["fire_target_effective"] = annual_spending_for_target / params["safe_withdrawal_rate"]
             tax_pack_accumulation = tax_pack_for_run if use_accumulation_taxes else None
-
-        if accumulation_sale_enabled_for_target:
-            annual_spending_for_target = max(
-                0.0,
-                float(annual_spending_for_target) + float(property_sale_total_drop_annual_today),
-            )
-            params["fire_target_effective"] = annual_spending_for_target / params["safe_withdrawal_rate"]
 
         params["annual_spending_for_target"] = annual_spending_for_target
 

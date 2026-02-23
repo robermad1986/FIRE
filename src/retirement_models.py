@@ -96,6 +96,23 @@ def build_manual_window_indices(
     }
 
 
+def resolve_retirement_net_spending(params: Mapping[str, Any]) -> float:
+    """Resolve annual net spending from portfolio used for retirement/fiscal targeting."""
+    base_spending = max(
+        0.0,
+        float(params.get("gasto_anual_neto_cartera", params.get("gastos_anuales", 0.0))),
+    )
+    if str(params.get("retirement_model_mode", "SIMPLE_TWO_PHASE")) == "SIMPLE_TWO_PHASE":
+        stage1_value = params.get("two_phase_withdrawal_stage1_net_annual")
+        if stage1_value is None:
+            return base_spending
+        try:
+            return max(0.0, float(stage1_value))
+        except (TypeError, ValueError):
+            return base_spending
+    return base_spending
+
+
 def calculate_effective_public_pension_annual(
     pension_publica_neta_anual: float,
     edad_pension_oficial: int,

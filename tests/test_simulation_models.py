@@ -1,5 +1,6 @@
 import pytest
 np = pytest.importorskip("numpy")
+from typing import Optional, List
 
 from src.simulation_models import (
     monte_carlo_normal,
@@ -235,3 +236,76 @@ def test_rental_drop_applies_from_sale_year_onward():
     assert path[3] == pytest.approx(34_800.0)
     assert path[4] == pytest.approx(45_600.0)
     assert path[5] == pytest.approx(56_400.0)
+
+
+@pytest.mark.stress
+def test_sensitivity_matrix_monotonic_dominance_invariants():
+    """Better return + lower inflation should not worsen years-to-FIRE in matrix cells."""
+    rng = np.random.default_rng(20260221)
+    return_offsets = np.array([-0.02, -0.01, 0.0, 0.01, 0.02], dtype=float)
+    inflation_offsets = np.array([0.02, 0.01, 0.0, -0.01, -0.02], dtype=float)
+
+    def years_to_fire(result: dict) -> Optional[int]:
+        target = float(result["fire_target_real"])
+        p50 = np.asarray(result["real_percentile_50"], dtype=float)
+        hits = np.where(p50 >= target)[0]
+        return int(hits[0]) if hits.size else None
+
+    total_pairs = 0
+    contradictions = 0
+
+    for _ in range(20):
+        base = dict(
+            initial_wealth=float(rng.uniform(0.0, 1_500_000.0)),
+            monthly_contribution=float(rng.uniform(0.0, 12_000.0)),
+            years=int(rng.integers(6, 31)),
+            mean_return=float(rng.uniform(0.00, 0.11)),
+            volatility=float(rng.uniform(0.08, 0.35)),
+            inflation_rate=float(rng.uniform(0.00, 0.06)),
+            annual_spending=float(rng.uniform(15_000.0, 90_000.0)),
+            safe_withdrawal_rate=float(rng.uniform(0.025, 0.05)),
+            contribution_growth_rate=float(rng.uniform(0.0, 0.04)),
+            num_simulations=1000,
+            seed=42,
+        )
+
+        matrix: List[List[Optional[int]]] = [[None for _ in range(5)] for _ in range(5)]
+        for i, ioff in enumerate(inflation_offsets):
+            for j, roff in enumerate(return_offsets):
+                result = monte_carlo_normal(
+                    initial_wealth=base["initial_wealth"],
+                    monthly_contribution=base["monthly_contribution"],
+                    years=base["years"],
+                    mean_return=base["mean_return"] + float(roff),
+                    volatility=base["volatility"],
+                    inflation_rate=max(-0.03, base["inflation_rate"] + float(ioff)),
+                    annual_spending=base["annual_spending"],
+                    safe_withdrawal_rate=base["safe_withdrawal_rate"],
+                    contribution_growth_rate=base["contribution_growth_rate"],
+                    num_simulations=base["num_simulations"],
+                    seed=base["seed"],
+                )
+                matrix[i][j] = years_to_fire(result)
+
+        # Dominance: cell (i2, j2) dominates (i1, j1) if it has >= return and <= inflation.
+        # Here i grows as inflation decreases because offsets go +2pp ... -2pp.
+        for i1 in range(5):
+            for j1 in range(5):
+                y1 = matrix[i1][j1]
+                for i2 in range(5):
+                    for j2 in range(5):
+                        better_or_equal = (j2 >= j1) and (i2 >= i1)
+                        strictly_better = (j2 > j1) or (i2 > i1)
+                        if not (better_or_equal and strictly_better):
+                            continue
+                        y2 = matrix[i2][j2]
+                        total_pairs += 1
+                        if y1 is not None and y2 is None:
+                            contradictions += 1
+                        elif y1 is not None and y2 is not None and y2 > y1:
+                            contradictions += 1
+
+    assert total_pairs > 0
+    contradiction_ratio = contradictions / total_pairs
+    # Monte Carlo noise can introduce tiny irregularities, but should be very rare.
+    assert contradiction_ratio <= 0.005

@@ -1,3 +1,5 @@
+import pytest
+
 from src.tax_engine import (
     load_tax_pack,
     calculate_general_tax_with_details,
@@ -67,3 +69,27 @@ def test_general_tax_foral_system_uses_foral_breakdown():
     assert detail["system"] == "foral"
     assert detail["foral_breakdown"]["tax"] >= 0.0
     assert detail["tax"] >= 0.0
+
+
+def test_es_2026_common_savings_brackets_include_27_and_28():
+    pack = load_tax_pack(2026, "es")
+    brackets = pack["irpf"]["savings"]["brackets"]
+    rates = [float(b["rate"]) for b in brackets]
+    assert 0.27 in rates
+    assert 0.28 in rates
+
+
+def test_savings_tax_marginal_rate_is_27_between_200k_and_300k():
+    pack = load_tax_pack(2026, "es")
+    region = "madrid"
+    tax_200k = calculate_savings_tax(200_000.0, pack, region)
+    tax_250k = calculate_savings_tax(250_000.0, pack, region)
+    assert (tax_250k - tax_200k) == pytest.approx(50_000.0 * 0.27)
+
+
+def test_savings_tax_marginal_rate_is_28_above_300k():
+    pack = load_tax_pack(2026, "es")
+    region = "madrid"
+    tax_300k = calculate_savings_tax(300_000.0, pack, region)
+    tax_350k = calculate_savings_tax(350_000.0, pack, region)
+    assert (tax_350k - tax_300k) == pytest.approx(50_000.0 * 0.28)

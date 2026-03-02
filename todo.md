@@ -261,6 +261,114 @@ Entregable:
 
 ---
 
+## Feedback externo (Reddit) - u/VanderSaba (hace 2 días)
+Objetivo: convertir feedback real de usuario en mejoras técnicas priorizadas y medibles.
+
+## F8 - Fiscalidad avanzada de pérdidas/ganancias (España)
+- [ ] Añadir ledger fiscal anual por simulación:
+  - [ ] pérdidas pendientes de compensar,
+  - [ ] ganancias del ahorro del año,
+  - [ ] rendimientos de capital mobiliario del año.
+- [ ] Implementar compensación con reglas configurables por Tax Pack:
+  - [ ] pérdidas vs ganancias patrimoniales,
+  - [ ] compensación cruzada con rendimientos (límite parametrizable, p.ej. 25%).
+- [ ] Soportar arrastre de saldos negativos entre ejercicios (ventana temporal parametrizable por año fiscal).
+- [ ] Mostrar en UI “crédito fiscal pendiente” y “ahorro fiscal aplicado este año”.
+- [ ] Añadir trazabilidad por fila en tablas de acumulación/retirada.
+
+## F9 - Tramos del ahorro altos (27% / 28%) y perfiles Fat FIRE
+- [ ] Auditar Tax Pack ES-2026 y asegurar tramos altos del ahorro en engine.
+- [ ] Añadir tests de regresión para carteras grandes:
+  - [ ] caso > 200k base ahorro anual,
+  - [ ] caso > 300k base ahorro anual,
+  - [ ] comparación delta vs 26% para validar impacto esperado.
+- [ ] Añadir nota metodológica visible en bloque fiscal: tramos activos por año/región.
+
+## F10 - Costes de mantenimiento/IBI en inmobiliario
+- [ ] Añadir input de coste anual de mantenimiento vivienda/inmuebles:
+  - [ ] modo simple: `% anual sobre valor`,
+  - [ ] modo avanzado: `€ anual fijo + % opcional`.
+- [ ] Integrar estos costes en:
+  - [ ] flujo de caja anual,
+  - [ ] gasto neto desde cartera,
+  - [ ] objetivo FIRE ajustado.
+- [ ] Reflejar coste en tablas (columna dedicada) y exportes.
+- [ ] Añadir toggle para incluir/excluir mantenimiento en simulación.
+
+## F11 - Export CSV “limpio” de trazabilidad
+- [ ] Nuevo export CSV normalizado (una fila por año por escenario/modelo).
+- [ ] Columnas mínimas:
+  - [ ] edad, año, tramo, capital inicial/final,
+  - [ ] retirada cartera, ingresos no cartera,
+  - [ ] impuestos estimados (desglosados),
+  - [ ] crédito fiscal aplicado/remanente,
+  - [ ] flags (capital agotado, fase, modelo).
+- [ ] Añadir metadatos en cabecera (schema_version, fecha, modo fiscal, modelo simulación).
+- [ ] Compatibilidad con import en hoja de cálculo y herramientas externas.
+
+## Criterios de aceptación de F8-F11
+- [ ] El usuario puede reproducir “años malos” y ver cómo reducen impuestos futuros.
+- [ ] En escenarios Fat FIRE, los tramos 27/28% alteran resultados frente a versión sin tramos altos.
+- [ ] El coste de mantenimiento inmobiliario impacta de forma transparente en FIRE target y retiradas.
+- [ ] Export CSV trazable se puede abrir y auditar sin post-procesado manual.
+
+## Orden recomendado de ejecución
+1. F9 (rápido y crítico para precisión fiscal actual).
+2. F10 (impacto UX alto y lógica relativamente acotada).
+3. F11 (observabilidad y validación externa).
+4. F8 (mayor complejidad; requiere diseño cuidadoso de ledger fiscal).
+
+## Issues numeradas (ejecución)
+Formato:
+- `ID` | `Título` | `Estimación` | `Dependencias` | `Estado`
+- Estimación orientativa: `S` (0.5-1 día), `M` (1-2 días), `L` (2-4 días).
+
+### Epic E1 - Fiscalidad y trazabilidad avanzada
+- [x] `ISSUE-001` | Auditar tramos ahorro ES-2026 (27%/28%) en engine y Tax Pack | S | - | Hecho (validación en metadata + regresión)
+- [x] `ISSUE-002` | Tests Fat FIRE para validar impacto de tramos altos | S | ISSUE-001 | Hecho (marginales 27%/28%)
+- [ ] `ISSUE-003` | Mostrar tramos fiscales activos (año/región) en bloque fiscal UI | S | ISSUE-001 | Todo
+
+### Epic E2 - Inmobiliario realista (coste de mantenimiento)
+- [ ] `ISSUE-004` | Inputs de mantenimiento/IBI (% y €) en panel inmobiliario | S | - | Todo
+- [ ] `ISSUE-005` | Integrar mantenimiento en flujos (gasto neto cartera + objetivo FIRE) | M | ISSUE-004 | Todo
+- [ ] `ISSUE-006` | Columna y trazabilidad de mantenimiento en tablas + exportes | S | ISSUE-005 | Todo
+- [ ] `ISSUE-007` | Tests de regresión de mantenimiento (acumulación/decumulación) | S | ISSUE-005 | Todo
+
+### Epic E3 - Export CSV limpio para integración externa
+- [ ] `ISSUE-008` | Diseñar schema CSV trazable (columnas + metadatos) | S | - | Todo
+- [ ] `ISSUE-009` | Implementar export CSV unificado por año/escenario/modelo | M | ISSUE-008 | Todo
+- [ ] `ISSUE-010` | Añadir control UI (botón + ayuda + naming) | S | ISSUE-009 | Todo
+- [ ] `ISSUE-011` | Tests de contrato CSV (cabecera, tipos, columnas mínimas) | S | ISSUE-009 | Todo
+
+### Epic E4 - Compensación pérdidas/ganancias (crédito fiscal)
+- [ ] `ISSUE-012` | Diseñar modelo de ledger fiscal anual y reglas de compensación | M | ISSUE-001 | Todo
+- [ ] `ISSUE-013` | Implementar motor de compensación y arrastre entre ejercicios | L | ISSUE-012 | Todo
+- [ ] `ISSUE-014` | Integrar crédito fiscal en acumulación/retirada y tablas | M | ISSUE-013 | Todo
+- [ ] `ISSUE-015` | Añadir UI de crédito fiscal aplicado/remanente | S | ISSUE-014 | Todo
+- [ ] `ISSUE-016` | Tests unitarios + stress de años malos/secuencias adversas | M | ISSUE-013 | Todo
+
+### Epic E5 - Disparidad CCAA + acumulación vs distribución (feedback Reddit 2026-03-02)
+- [ ] `ISSUE-017` | Auditoría selector CCAA end-to-end (UI -> motor -> cache keys -> export) | S | ISSUE-003 | Todo
+- [ ] `ISSUE-018` | Comparador regional rápido (Madrid/Cataluña/Valencia + región activa) en bloque fiscal | M | ISSUE-017 | Todo
+- [ ] `ISSUE-019` | Refinar modelo acumulación vs distribución (dividendos anuales vs fondos de acumulación con traspasos) | M | ISSUE-001 | Todo
+- [ ] `ISSUE-020` | KPI/tabla comparativa “coste fiscal acumulado” por régimen (fondos vs cartera directa) | M | ISSUE-019 | Todo
+- [ ] `ISSUE-021` | Tests extremos de régimen fiscal (alta rentabilidad por dividendo, alta rotación, horizonte largo) | M | ISSUE-019 | Todo
+
+## Plan de sprints propuesto (ejecutable)
+- Sprint 1 (rápido, precisión fiscal): ISSUE-001, ISSUE-002, ISSUE-003
+- Sprint 2 (inmobiliario): ISSUE-004, ISSUE-005, ISSUE-006, ISSUE-007
+- Sprint 3 (export): ISSUE-008, ISSUE-009, ISSUE-010, ISSUE-011
+- Sprint 4 (ledger fiscal): ISSUE-012, ISSUE-013, ISSUE-014, ISSUE-015, ISSUE-016
+- Sprint 5 (fiscalidad territorial + regímenes): ISSUE-017, ISSUE-018, ISSUE-019, ISSUE-020, ISSUE-021
+
+## Checklist de cierre por issue
+- [ ] Implementación en código + tests asociados.
+- [ ] Validación manual en UI (caso feliz + caso extremo).
+- [ ] Actualización de documentación (`todo.md` + `README` si aplica).
+- [ ] Nota corta para update Reddit/changelog.
+
+---
+
 ## Riesgos y mitigaciones
 - Riesgo: mezcla de estado quick/full.
   - Mitigación: prefijos de keys por modo y reconciliación explícita.
@@ -300,6 +408,7 @@ Entregable:
 
 ## Bitácora de avance
 - [x] 2026-02-23: tests de presets y stress matricial incorporados.
+- [x] 2026-03-02: incorporado feedback Reddit (Longjumping-Range852, ducks-and-cats) a roadmap técnico (E5).
 - [ ] 2026-02-24: router quick/full implementado.
 - [ ] 2026-02-24: módulos quick MVP cerrados.
 - [ ] 2026-02-25: persistencia quick + e2e básicos.

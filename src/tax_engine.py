@@ -396,6 +396,40 @@ def validate_tax_pack_metadata(tax_pack: Dict[str, Any]) -> List[str]:
         except ValueError:
             errors.append(f"meta.{date_field} must use YYYY-MM-DD format")
 
+    # Savings-bracket sanity checks (critical for FIRE projections on large portfolios).
+    common_savings = tax_pack.get("irpf", {}).get("savings", {}).get("brackets", [])
+    if not isinstance(common_savings, list) or not common_savings:
+        errors.append("irpf.savings.brackets must be a non-empty list")
+    else:
+        rates = []
+        for idx, bracket in enumerate(common_savings):
+            rate = bracket.get("rate") if isinstance(bracket, dict) else None
+            if rate is None:
+                errors.append(f"irpf.savings.brackets[{idx}].rate is required")
+                continue
+            try:
+                rates.append(float(rate))
+            except (TypeError, ValueError):
+                errors.append(f"irpf.savings.brackets[{idx}].rate must be numeric")
+        if rates and any(r < 0.0 or r > 1.0 for r in rates):
+            errors.append("irpf.savings.brackets rates must be within [0, 1]")
+        if rates and any(rates[i] > rates[i + 1] for i in range(len(rates) - 1)):
+            errors.append("irpf.savings.brackets rates must be non-decreasing")
+
+        country = str(meta.get("country", "")).upper()
+        try:
+            year = int(meta.get("year", 0))
+        except (TypeError, ValueError):
+            year = 0
+        # Spain 2026 pack should include high-income savings brackets 27% and 28%.
+        if country == "ES" and year >= 2026:
+            has_27 = any(abs(r - 0.27) < 1e-9 for r in rates)
+            has_28 = any(abs(r - 0.28) < 1e-9 for r in rates)
+            if not has_27 or not has_28:
+                errors.append(
+                    "irpf.savings.brackets for ES>=2026 must include 27% and 28% top rates"
+                )
+
     errors.extend(validate_tax_pack_coverage(tax_pack))
     return errors
 
